@@ -71,6 +71,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
   const [events, setEvents] = useState<WorkspaceEvent[]>([])
   const [form, setForm] = useState<WorkspaceFormState>(EMPTY_FORM)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [isCreating, setIsCreating] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
@@ -120,12 +121,23 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
     return () => setStatusbarItemGroup?.('workspaces', [])
   }, [setStatusbarItemGroup, workspaces.length])
 
+  useEffect(() => {
+    if (!selected || isCreating || editingId === selected.id) {
+      return
+    }
+    setEditingId(selected.id)
+    setForm(hydrateForm(selected))
+  }, [editingId, isCreating, selected])
+
   const startCreate = (preset?: WorkspaceFormState) => {
+    setIsCreating(true)
     setEditingId(null)
     setForm(preset ?? EMPTY_FORM)
   }
 
   const startEdit = (workspace: Workspace) => {
+    setIsCreating(false)
+    setSelectedId(workspace.id)
     setEditingId(workspace.id)
     setForm(hydrateForm(workspace))
   }
@@ -138,9 +150,10 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
     }
     setSaving(true)
     try {
-      const workspace = editingId ? await updateWorkspace(editingId, payload) : await createWorkspace(payload)
+      const workspace = editingId && !isCreating ? await updateWorkspace(editingId, payload) : await createWorkspace(payload)
       await refresh()
       setSelectedId(workspace.id)
+      setIsCreating(false)
       setEditingId(workspace.id)
       setForm(hydrateForm(workspace))
       notify({ message: `${workspace.name} saved`, title: 'M.i.A Workspace' })
@@ -195,7 +208,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
                     active && 'border-(--ui-stroke-tertiary) bg-(--ui-control-active-background)'
                   )}
                   key={workspace.id}
-                  onClick={() => setSelectedId(workspace.id)}
+                  onClick={() => startEdit(workspace)}
                   type="button"
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -218,7 +231,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
             <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-sidebar-surface-background) p-5">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-semibold text-foreground">{editingId ? 'Edit workspace' : 'Create workspace'}</h2>
+                  <h2 className="text-lg font-semibold text-foreground">{editingId && !isCreating ? 'Edit workspace' : 'Create workspace'}</h2>
                   <p className="mt-1 text-sm text-(--ui-text-secondary)">Base durável para orquestração da M.i.A.</p>
                 </div>
                 {selected && (
@@ -249,7 +262,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
               <div className="mt-5 flex items-center justify-between gap-3">
                 <div className="text-xs text-(--ui-text-tertiary)">Storage: <code>workspaces.db</code> no Hermes home ativo.</div>
                 <Button disabled={saving} onClick={() => void save()} type="button">
-                  {saving ? 'Saving…' : editingId ? 'Save changes' : 'Create workspace'}
+                  {saving ? 'Saving…' : editingId && !isCreating ? 'Save changes' : 'Create workspace'}
                 </Button>
               </div>
             </section>
@@ -262,8 +275,10 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
                     <div className="font-medium text-foreground">{selected.name}</div>
                     <div className="mt-1 text-xs text-(--ui-text-tertiary)">{selected.id}</div>
                   </div>
+                  <StatusLine label="Board" value={selected.board_id || 'not configured'} />
                   <StatusLine label="Repo" ok={activeStatus?.repo_exists} value={selected.repo_path || 'not configured'} />
                   <StatusLine label="Vault" ok={activeStatus?.vault_exists} value={selected.vault_path || 'not configured'} />
+                  <StatusLine label="Description" value={selected.description || 'not configured'} />
                   <div className="grid grid-cols-3 gap-2">
                     <Metric label="Profiles" value={activeStatus?.profile_count ?? 0} />
                     <Metric label="Tasks" value={taskTotal} />
@@ -320,7 +335,9 @@ function StatusLine({ label, ok, value }: { label: string; ok?: boolean; value: 
     <div className="rounded-lg border border-(--ui-stroke-secondary) p-3">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium uppercase tracking-wide text-(--ui-text-tertiary)">{label}</span>
-        <span className={cn('text-xs', ok ? 'text-primary' : 'text-(--ui-text-tertiary)')}>{ok ? 'found' : 'not found'}</span>
+        {typeof ok === 'boolean' && (
+          <span className={cn('text-xs', ok ? 'text-primary' : 'text-(--ui-text-tertiary)')}>{ok ? 'found' : 'not found'}</span>
+        )}
       </div>
       <div className="mt-1 break-all text-sm text-foreground">{value}</div>
     </div>
