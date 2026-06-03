@@ -210,10 +210,11 @@ const BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
 
 const DESKTOP_CONNECTION_CONFIG_PATH = path.join(app.getPath('userData'), 'connection.json')
 const DESKTOP_UPDATE_CONFIG_PATH = path.join(app.getPath('userData'), 'updates.json')
-// Branch we track for self-update. The GUI work has merged to main, so this
-// tracks main. User can also override at runtime via
-// hermesDesktop.updates.setBranch().
-const DEFAULT_UPDATE_BRANCH = 'main'
+const MIA_UPDATE_STATE_PATH = path.join(HERMES_HOME, 'mia-hermes-update.json')
+// Branch we track for self-update. M.i.A Hermes is maintained on a custom
+// product branch, while official changes are merged from upstream/main by the
+// daily updater script.
+const DEFAULT_UPDATE_BRANCH = 'mia-hermes'
 // desktop.log lives under HERMES_HOME/logs/ so it sits next to agent.log,
 // errors.log, gateway.log produced by hermes_logging.setup_logging — one log
 // directory per user, regardless of which UI surface produced the line.
@@ -1179,6 +1180,11 @@ async function resolveHealedBranch(updateRoot, branch) {
 
 async function checkUpdates() {
   const updateRoot = resolveUpdateRoot()
+  const miaState = readMiaUpdateState()
+  if (isMiaInstallerPending(miaState)) {
+    return miaPendingUpdateStatus(updateRoot, miaState)
+  }
+
   let { branch } = readDesktopUpdateConfig()
   const gitDir = path.join(updateRoot, '.git')
   if (!directoryExists(gitDir)) {
@@ -1230,23 +1236,79 @@ async function checkUpdates() {
   }
 }
 
-async function readCommitLog(cwd, branch) {
+function readCommitLog(cwd, branch, remote = 'origin') {
   const SEP = '\x1f'
   const REC = '\x1e'
-  const { stdout } = await runGit(
-    ['log', `HEAD..origin/${branch}`, `--pretty=format:%H${SEP}%s${SEP}%an${SEP}%at${REC}`, '-n', '40'],
+  return runGit(
+    ['log', `HEAD..${remote}/${branch}`, `--pretty=format:%H${SEP}%s${SEP}%an${SEP}%at${REC}`, '-n', '40'],
     { cwd }
+  ).then(({ stdout }) =>
+    stdout
+      .split(REC)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => {
+        const [sha, summary, author, at] = line.split(SEP)
+        return { sha, summary, author, at: Number.parseInt(at, 10) * 1000 }
+      })
   )
-
-  return stdout
-    .split(REC)
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map(line => {
-      const [sha, summary, author, at] = line.split(SEP)
-      return { sha, summary, author, at: Number.parseInt(at, 10) * 1000 }
-    })
 }
+
+function readMiaUpdateState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(MIA_UPDATE_STATE_PATH, 'utf8'))
+    if (!parsed || typeof parsed !== 'object') return null
+    const installerPath = typeof parsed.installerPath === 'string' ? parsed.installerPath : ''
+    const afterSha = typeof parsed.afterSha === 'string' ? parsed.afterSha : ''
+    if (!installerPath || !afterSha || !fileExists(installerPath)) return null
+    return {
+      installerPath,
+      beforeSha: typeof parsed.beforeSha === 'string' ? parsed.beforeSha : null,
+      afterSha,
+      upstreamSha: typeof parsed.upstreamSha === 'string' ? parsed.upstreamSha : null,
+      createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : null,
+      branch: typeof parsed.branch === 'string' ? parsed.branch : 'mia-hermes'
+    }
+  } catch {
+    return null
+  }
+}
+
+function currentInstalledCommit() {
+  return INSTALL_STAMP?.commit || null
+}
+
+function isMiaInstallerPending(state) {
+  if (!state?.afterSha) return false
+  const installed = currentInstalledCommit()
+  return !installed || !state.afterSha.startsWith(installed) && !installed.startsWith(state.afterSha)
+}
+
+function miaPendingUpdateStatus(updateRoot, state) {
+  return {
+    supported: true,
+    source: 'mia-installer',
+    branch: state.branch || 'mia-hermes',
+    currentBranch: 'mia-hermes',
+    behind: 1,
+    currentSha: currentInstalledCommit() || state.beforeSha || undefined,
+    targetSha: state.afterSha,
+    commits: [
+      {
+        sha: state.afterSha,
+        summary: 'M.i.A Hermes update package is ready to install',
+        author: 'M.i.A Updater',
+        at: state.createdAt ? Date.parse(state.createdAt) || Date.now() : Date.now()
+      }
+    ],
+    dirty: false,
+    hermesRoot: updateRoot,
+    installerPath: state.installerPath,
+    fetchedAt: Date.now(),
+    message: 'A M.i.A Hermes installer has already been prepared.'
+  }
+}
+
 
 let updateInFlight = false
 
@@ -1280,6 +1342,22 @@ async function applyUpdates(opts = {}) {
   updateInFlight = true
 
   try {
+    const miaState = readMiaUpdateState()
+    if (isMiaInstallerPending(miaState)) {
+      emitUpdateProgress({ stage: 'restart', message: 'Opening the prepared M.i.A Hermes installer…', percent: 100 })
+      const child = spawn(miaState.installerPath, [], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false
+      })
+      child.unref()
+      rememberLog(`[updates] launched M.i.A installer: ${miaState.installerPath}; exiting desktop`)
+      setTimeout(() => {
+        app.quit()
+      }, 600)
+      return { ok: true, handedOff: true, updater: miaState.installerPath }
+    }
+
     const updater = resolveUpdaterBinary()
     if (!updater && !IS_WINDOWS) {
       // macOS/Linux drag-install: no staged Tauri hermes-setup. Unlike Windows

@@ -95,6 +95,8 @@ export interface DesktopUpdateCommit {
 
 export interface DesktopUpdateStatus {
   supported: boolean
+  source?: 'git' | 'mia-installer'
+  installerPath?: string
   branch?: string
   currentBranch?: string
   reason?: string

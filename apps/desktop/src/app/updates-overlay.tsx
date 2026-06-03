@@ -199,9 +199,13 @@ function IdleView({
           <Sparkles className="size-7" />
         </span>
 
-        <DialogTitle className="text-center text-xl">New update available</DialogTitle>
+        <DialogTitle className="text-center text-xl">
+          {status.source === 'mia-installer' ? 'M.i.A Hermes update ready' : 'New update available'}
+        </DialogTitle>
         <DialogDescription className="text-center text-sm">
-          A new version of Hermes is ready to install.
+          {status.source === 'mia-installer'
+            ? 'A prepared installer is ready. Click update to close M.i.A Hermes and start the installer.'
+            : 'A new version of Hermes is ready to install.'}
         </DialogDescription>
       </div>
 
@@ -223,7 +227,7 @@ function IdleView({
 
       <div className="grid gap-2">
         <Button className="h-10 text-sm font-semibold" onClick={onInstall} size="default">
-          Update now
+          {status.source === 'mia-installer' ? 'Install update' : 'Update now'}
         </Button>
         <button
           className="text-center text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
