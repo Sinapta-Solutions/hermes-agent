@@ -19,7 +19,9 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -28,6 +30,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1459,6 +1462,292 @@ async def get_action_status(name: str, lines: int = 200):
         "pid": pid,
         "lines": tail,
     }
+
+
+# ---------------------------------------------------------------------------
+# Native M.i.A workspaces — dashboard/Desktop API surface
+# ---------------------------------------------------------------------------
+
+_workspaces_conn: Optional[sqlite3.Connection] = None
+
+
+def _workspace_db_path() -> Path:
+    return get_hermes_home() / "workspaces.db"
+
+
+def _ensure_workspaces_db() -> sqlite3.Connection:
+    global _workspaces_conn
+    if _workspaces_conn is not None:
+        return _workspaces_conn
+
+    db_path = _workspace_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        from hermes_state import apply_wal_with_fallback
+        apply_wal_with_fallback(conn, db_label="workspaces.db")
+    except Exception:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except Exception:
+            pass
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS workspaces (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          repo_path TEXT,
+          vault_path TEXT,
+          board_id TEXT,
+          description TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS workspace_profiles (
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          profile_name TEXT NOT NULL,
+          role TEXT,
+          PRIMARY KEY (workspace_id, profile_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS workspace_events (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          type TEXT NOT NULL,
+          message TEXT NOT NULL,
+          metadata_json TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS workspace_tasks (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL,
+          source TEXT,
+          assigned_profile TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workspace_events_workspace_created
+          ON workspace_events(workspace_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_workspace_tasks_workspace_status
+          ON workspace_tasks(workspace_id, status);
+        """
+    )
+    conn.commit()
+    _workspaces_conn = conn
+    return conn
+
+
+def _workspace_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _workspace_text(value: Any, *, max_len: int = 4096) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:max_len]
+
+
+def _workspace_response(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "repo_path": row["repo_path"],
+        "vault_path": row["vault_path"],
+        "board_id": row["board_id"],
+        "description": row["description"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _workspace_error(message: str, *, code: str, status: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"message": message, "type": "invalid_request_error", "code": code}},
+    )
+
+
+def _record_workspace_event(
+    conn: sqlite3.Connection,
+    workspace_id: str,
+    event_type: str,
+    message: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO workspace_events (id, workspace_id, type, message, metadata_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"evt_{uuid.uuid4().hex}",
+            workspace_id,
+            event_type,
+            message,
+            json.dumps(metadata or {}, ensure_ascii=False) if metadata else None,
+            _workspace_now(),
+        ),
+    )
+
+
+def _get_workspace_row(workspace_id: str) -> sqlite3.Row:
+    conn = _ensure_workspaces_db()
+    row = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}")
+    return row
+
+
+async def _workspace_body(request: Request) -> Dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    return body
+
+
+@app.get("/api/workspaces")
+def list_workspaces():
+    conn = _ensure_workspaces_db()
+    rows = conn.execute("SELECT * FROM workspaces ORDER BY updated_at DESC, name COLLATE NOCASE ASC").fetchall()
+    return {"object": "list", "workspaces": [_workspace_response(row) for row in rows]}
+
+
+@app.post("/api/workspaces")
+async def create_workspace(request: Request):
+    body = await _workspace_body(request)
+    name = _workspace_text(body.get("name"), max_len=160)
+    if not name:
+        return _workspace_error("Workspace name is required", code="invalid_workspace_name", status=400)
+
+    raw_id = _workspace_text(body.get("id"), max_len=80)
+    workspace_id = raw_id or f"ws_{uuid.uuid4().hex[:16]}"
+    if not re.match(r"^[A-Za-z0-9_.:-]{3,80}$", workspace_id):
+        return _workspace_error("Invalid workspace ID", code="invalid_workspace_id", status=400)
+
+    now = _workspace_now()
+    conn = _ensure_workspaces_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO workspaces (id, name, repo_path, vault_path, board_id, description, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                workspace_id,
+                name,
+                _workspace_text(body.get("repo_path"), max_len=2048),
+                _workspace_text(body.get("vault_path"), max_len=2048),
+                _workspace_text(body.get("board_id"), max_len=160),
+                _workspace_text(body.get("description"), max_len=4096),
+                now,
+                now,
+            ),
+        )
+        _record_workspace_event(conn, workspace_id, "workspace.created", f"Workspace created: {name}")
+        conn.commit()
+    except sqlite3.IntegrityError:
+        return _workspace_error(f"Workspace already exists: {workspace_id}", code="workspace_exists", status=409)
+
+    row = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+    return JSONResponse(status_code=201, content={"object": "hermes.workspace", "workspace": _workspace_response(row)})
+
+
+@app.patch("/api/workspaces/{workspace_id}")
+async def patch_workspace(workspace_id: str, request: Request):
+    _get_workspace_row(workspace_id)
+    body = await _workspace_body(request)
+    allowed = {"name", "repo_path", "vault_path", "board_id", "description"}
+    unknown = sorted(set(body) - allowed)
+    if unknown:
+        return _workspace_error(
+            f"Unsupported workspace fields: {', '.join(unknown)}",
+            code="unsupported_workspace_field",
+            status=400,
+        )
+    if "name" in body and not _workspace_text(body.get("name"), max_len=160):
+        return _workspace_error("Workspace name is required", code="invalid_workspace_name", status=400)
+
+    fields = []
+    values: List[Any] = []
+    for key in ("name", "repo_path", "vault_path", "board_id", "description"):
+        if key in body:
+            fields.append(f"{key} = ?")
+            max_len = 160 if key in {"name", "board_id"} else 2048 if key.endswith("_path") else 4096
+            values.append(_workspace_text(body.get(key), max_len=max_len))
+
+    conn = _ensure_workspaces_db()
+    if fields:
+        fields.append("updated_at = ?")
+        values.append(_workspace_now())
+        values.append(workspace_id)
+        conn.execute(f"UPDATE workspaces SET {', '.join(fields)} WHERE id = ?", values)
+        _record_workspace_event(conn, workspace_id, "workspace.updated", "Workspace metadata updated", {"fields": sorted(body.keys())})
+        conn.commit()
+
+    row = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+    return {"object": "hermes.workspace", "workspace": _workspace_response(row)}
+
+
+@app.get("/api/workspaces/{workspace_id}/status")
+def workspace_status(workspace_id: str):
+    row = _get_workspace_row(workspace_id)
+    conn = _ensure_workspaces_db()
+    profile_count = conn.execute("SELECT COUNT(*) AS count FROM workspace_profiles WHERE workspace_id = ?", (workspace_id,)).fetchone()["count"]
+    event_count = conn.execute("SELECT COUNT(*) AS count FROM workspace_events WHERE workspace_id = ?", (workspace_id,)).fetchone()["count"]
+    task_rows = conn.execute("SELECT status, COUNT(*) AS count FROM workspace_tasks WHERE workspace_id = ? GROUP BY status", (workspace_id,)).fetchall()
+    tasks = {task_row["status"]: task_row["count"] for task_row in task_rows}
+    repo_path = row["repo_path"]
+    vault_path = row["vault_path"]
+    return {
+        "object": "hermes.workspace.status",
+        "workspace_id": workspace_id,
+        "profile_count": profile_count,
+        "event_count": event_count,
+        "task_counts": tasks,
+        "repo_exists": bool(repo_path and Path(repo_path).exists()),
+        "vault_exists": bool(vault_path and Path(vault_path).exists()),
+    }
+
+
+@app.get("/api/workspaces/{workspace_id}/events")
+def workspace_events(workspace_id: str, limit: int = 25):
+    _get_workspace_row(workspace_id)
+    bounded_limit = min(max(int(limit or 25), 0), 100)
+    conn = _ensure_workspaces_db()
+    rows = conn.execute(
+        "SELECT * FROM workspace_events WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?",
+        (workspace_id, bounded_limit),
+    ).fetchall()
+    events = []
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+        except Exception:
+            metadata = None
+        events.append({
+            "id": row["id"],
+            "workspace_id": row["workspace_id"],
+            "type": row["type"],
+            "message": row["message"],
+            "metadata": metadata,
+            "created_at": row["created_at"],
+        })
+    return {"object": "list", "events": events, "limit": bounded_limit}
 
 
 @app.get("/api/sessions")
