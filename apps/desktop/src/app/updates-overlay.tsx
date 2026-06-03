@@ -177,11 +177,17 @@ function IdleView({
     return (
       <CenteredStatus
         action={
-          <Button onClick={onLater} size="sm" variant="outline">
-            Close
-          </Button>
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button disabled={checking} onClick={onRetryCheck} size="sm">
+              {checking ? <Loader2 className="size-3 animate-spin" /> : null}
+              {checking ? 'Checking…' : 'Check again'}
+            </Button>
+            <Button onClick={onLater} size="sm" variant="outline">
+              Close
+            </Button>
+          </div>
         }
-        body="You’re running the latest version."
+        body="You’re running the latest version. If M.i.A just generated an update, it can take a moment for the local installer manifest to refresh — click Check again before closing and reopening the app."
         icon={<CheckCircle2 className="size-7 text-emerald-600 dark:text-emerald-400" />}
         title="You’re all set"
       />
@@ -271,9 +277,9 @@ function ManualView({ command, onDone }: { command: string; onDone: () => void }
       </div>
 
       <button
-        type="button"
-        onClick={handleCopy}
         className="group flex w-full items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-3 text-left transition-colors hover:border-border hover:bg-muted/50"
+        onClick={handleCopy}
+        type="button"
       >
         <code className="select-all font-mono text-sm text-foreground">
           <span className="text-muted-foreground">$ </span>
