@@ -13,19 +13,21 @@ import type {
   CronJobUpdates,
   ElevenLabsVoicesResponse,
   EnvVarInfo,
+  HermesConfig,
+  HermesConfigRecord,
   KanbanAssigneesResponse,
   KanbanBoard,
   KanbanBoardsResponse,
-  KanbanEvent,
+  KanbanComment,
+  KanbanCommentMutationResponse,
+  KanbanCommentPayload,
   KanbanTask,
-  KanbanStatus,
   KanbanTaskDetailResponse,
   KanbanTaskMutationResponse,
+
   KanbanTaskPayload,
-  KanbanTaskUpdatePayload,
   KanbanTasksResponse,
-  HermesConfig,
-  HermesConfigRecord,
+  KanbanTaskUpdatePayload,
   LogsResponse,
   MessagingPlatformsResponse,
   MessagingPlatformTestResponse,
@@ -50,7 +52,6 @@ import type {
   ToolsetConfig,
   ToolsetInfo,
   Workspace,
-  WorkspaceEvent,
   WorkspaceEventsResponse,
   WorkspaceMutationResponse,
   WorkspacePayload,
@@ -81,20 +82,23 @@ export type {
   ElevenLabsVoice,
   ElevenLabsVoicesResponse,
   EnvVarInfo,
-  GatewayReadyPayload,
+  HermesConfig,
+  HermesConfigRecord,
   KanbanAssigneesResponse,
   KanbanBoard,
   KanbanBoardsResponse,
+  KanbanComment,
+  KanbanCommentMutationResponse,
+  KanbanCommentPayload,
   KanbanEvent,
-  KanbanTask,
+  KanbanFailure,
   KanbanStatus,
+  KanbanTask,
   KanbanTaskDetailResponse,
   KanbanTaskMutationResponse,
   KanbanTaskPayload,
-  KanbanTaskUpdatePayload,
   KanbanTasksResponse,
-  HermesConfig,
-  HermesConfigRecord,
+  KanbanTaskUpdatePayload,
   LogsResponse,
   MessagingEnvVarInfo,
   MessagingHomeChannel,
@@ -194,6 +198,35 @@ export function getKanbanTaskDetail(boardSlug: string, taskId: string): Promise<
   return window.hermesDesktop.api<KanbanTaskDetailResponse>({
     path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}`
   })
+}
+
+export function createKanbanTaskComment(
+  boardSlug: string,
+  taskId: string,
+  body: KanbanCommentPayload
+): Promise<KanbanComment> {
+  return window.hermesDesktop
+    .api<KanbanCommentMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/comments`,
+      method: 'POST',
+      body
+    })
+    .then(result => result.comment)
+}
+
+export function updateKanbanTaskComment(
+  boardSlug: string,
+  taskId: string,
+  commentId: number,
+  body: KanbanCommentPayload
+): Promise<KanbanComment> {
+  return window.hermesDesktop
+    .api<KanbanCommentMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/comments/${commentId}`,
+      method: 'PATCH',
+      body
+    })
+    .then(result => result.comment)
 }
 
 export function getKanbanAssignees(): Promise<string[]> {

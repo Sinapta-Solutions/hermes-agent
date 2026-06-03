@@ -138,7 +138,10 @@ export function AppShell({
         tools={titlebarTools}
       />
 
-      <main className="relative z-3 flex min-h-0 w-full flex-1 flex-col overflow-hidden transition-none">
+      <main
+        className="relative isolate z-3 flex min-h-0 w-full flex-1 flex-col overflow-hidden transition-none"
+        data-hermes-ambient-shell
+      >
         <PaneShell className="min-h-0 flex-1">
           <div
             aria-hidden="true"

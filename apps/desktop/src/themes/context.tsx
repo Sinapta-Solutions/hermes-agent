@@ -18,7 +18,7 @@ import type { DesktopTheme, DesktopThemeColors } from './types'
 
 const SKIN_KEY = 'hermes-desktop-theme-v2'
 const MODE_KEY = 'hermes-desktop-mode-v1'
-const RETIRED_SKINS = new Set(['nous-light', 'default', 'gold'])
+const RETIRED_SKINS = new Set(['nous-light', 'default', 'gold', 'mia', 'odyssey'])
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 

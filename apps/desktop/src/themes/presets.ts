@@ -3,7 +3,7 @@
  * Add new themes here — no code changes needed elsewhere.
  */
 
-import type { DesktopTheme, DesktopThemeTypography } from './types'
+import type { DesktopTheme, DesktopThemeColors, DesktopThemeTypography } from './types'
 
 const SYSTEM_SANS =
   '"Segoe WPC", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif'
@@ -15,9 +15,54 @@ export const DEFAULT_TYPOGRAPHY: DesktopThemeTypography = { fontSans: SYSTEM_SAN
 const NOUS_BLUE = '#0053FD'
 const PSYCHE_BLUE = '#1540B1'
 const PSYCHE_WARM = '#FFE6CB'
+const ODYSSEUS_FONT = `"JetBrains Mono", ${SYSTEM_MONO}`
 
 const nousTint = (pct: number) => `color-mix(in srgb, ${NOUS_BLUE} ${pct}%, #FFFFFF)`
 const nousTintTransparent = (pct: number) => `color-mix(in srgb, ${NOUS_BLUE} ${pct}%, transparent)`
+
+function odysseusColors({
+  accent,
+  background,
+  border,
+  panel,
+  sidebar,
+  text
+}: {
+  accent: string
+  background: string
+  border: string
+  panel: string
+  sidebar: string
+  text: string
+}): DesktopThemeColors {
+  return {
+    background,
+    foreground: text,
+    card: panel,
+    cardForeground: text,
+    muted: background,
+    mutedForeground: `color-mix(in srgb, ${text} 68%, transparent)`,
+    popover: panel,
+    popoverForeground: text,
+    primary: accent,
+    primaryForeground: background,
+    secondary: `color-mix(in srgb, ${accent} 16%, ${panel})`,
+    secondaryForeground: text,
+    accent: `color-mix(in srgb, ${accent} 18%, ${panel})`,
+    accentForeground: accent,
+    border,
+    input: border,
+    ring: accent,
+    midground: accent,
+    composerRing: accent,
+    destructive: '#f38ba8',
+    destructiveForeground: background,
+    sidebarBackground: sidebar,
+    sidebarBorder: border,
+    userBubble: `color-mix(in srgb, ${accent} 12%, ${panel})`,
+    userBubbleBorder: `color-mix(in srgb, ${accent} 42%, ${border})`
+  }
+}
 
 /**
  * Nous — canonical Hermes desktop identity. The palette keeps the current
@@ -265,6 +310,117 @@ export const lavenderTheme: DesktopTheme = {
   }
 }
 
+/** Official Odysseus Latte palette — bright Catppuccin command center. */
+export const odysseusLatteTheme: DesktopTheme = {
+  name: 'odysseus-latte',
+  label: 'Odysseus Latte',
+  description: 'Official Odysseus light palette with violet accent',
+  colors: odysseusColors({
+    background: '#eff1f5',
+    panel: '#e6e9ef',
+    border: '#ccd0da',
+    text: '#4c4f69',
+    sidebar: '#dce0e8',
+    accent: '#8839ef'
+  }),
+  darkColors: odysseusColors({
+    background: '#1e1e2e',
+    panel: '#181825',
+    border: '#313244',
+    text: '#cdd6f4',
+    sidebar: '#11111b',
+    accent: '#cba6f7'
+  }),
+  typography: { fontMono: ODYSSEUS_FONT }
+}
+
+/** Official Odysseus Frappé palette — muted dark violet. */
+export const odysseusFrappeTheme: DesktopTheme = {
+  name: 'odysseus-frappe',
+  label: 'Odysseus Frappé',
+  description: 'Official Odysseus muted dark palette',
+  colors: odysseusColors({
+    background: '#303446',
+    panel: '#292c3c',
+    border: '#414559',
+    text: '#c6d0f5',
+    sidebar: '#232634',
+    accent: '#ca9ee6'
+  }),
+  typography: { fontMono: ODYSSEUS_FONT }
+}
+
+/** Official Odysseus Macchiato palette — warm dark violet. */
+export const odysseusMacchiatoTheme: DesktopTheme = {
+  name: 'odysseus-macchiato',
+  label: 'Odysseus Macchiato',
+  description: 'Official Odysseus warm dark palette',
+  colors: odysseusColors({
+    background: '#24273a',
+    panel: '#1e2030',
+    border: '#363a4f',
+    text: '#cad3f5',
+    sidebar: '#181926',
+    accent: '#c6a0f6'
+  }),
+  typography: { fontMono: ODYSSEUS_FONT }
+}
+
+/** Official Odysseus Mocha palette — darkest Catppuccin command center. */
+export const odysseusMochaTheme: DesktopTheme = {
+  name: 'odysseus-mocha',
+  label: 'Odysseus Mocha',
+  description: 'Official Odysseus/Catppuccin Mocha palette',
+  colors: odysseusColors({
+    background: '#1e1e2e',
+    panel: '#181825',
+    border: '#313244',
+    text: '#cdd6f4',
+    sidebar: '#11111b',
+    accent: '#cba6f7'
+  }),
+  typography: { fontMono: ODYSSEUS_FONT }
+}
+
+/** M.i.A — executive orchestration skin: dark blue, legal gold, and violet telemetry. */
+export const miaTheme: DesktopTheme = {
+  name: 'mia',
+  label: 'M.i.A',
+  description: 'Executive orchestrator palette for JurisHUB operations',
+  colors: {
+    background: '#070b17',
+    foreground: '#f4ead2',
+    card: '#101827',
+    cardForeground: '#f4ead2',
+    muted: '#172033',
+    mutedForeground: '#aeb7ca',
+    popover: '#101827',
+    popoverForeground: '#f4ead2',
+    primary: '#f7c873',
+    primaryForeground: '#070b17',
+    secondary: '#202a44',
+    secondaryForeground: '#e7d7b2',
+    accent: '#261f3d',
+    accentForeground: '#cba6f7',
+    border: '#2c3957',
+    input: '#364563',
+    ring: '#f7c873',
+    midground: '#cba6f7',
+    composerRing: '#f7c873',
+    destructive: '#f38ba8',
+    destructiveForeground: '#070b17',
+    sidebarBackground: '#050914',
+    sidebarBorder: '#202a44',
+    userBubble: '#172033',
+    userBubbleBorder: '#4a3b6b'
+  },
+  typography: {
+    fontSans: `"Inter", ${SYSTEM_SANS}`,
+    fontMono: ODYSSEUS_FONT,
+    fontUrl: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap'
+  }
+}
+
 /** Warm crimson and bronze — forge vibes. Matches the CLI ares skin. */
 export const emberTheme: DesktopTheme = {
   name: 'ember',
@@ -412,6 +568,11 @@ export const BUILTIN_THEMES: Record<string, DesktopTheme> = {
   nous: nousTheme,
   midnight: midnightTheme,
   odyssey: odysseyTheme,
+  'odysseus-latte': odysseusLatteTheme,
+  'odysseus-frappe': odysseusFrappeTheme,
+  'odysseus-macchiato': odysseusMacchiatoTheme,
+  'odysseus-mocha': odysseusMochaTheme,
+  mia: miaTheme,
   ume: umeTheme,
   lavender: lavenderTheme,
   ember: emberTheme,
@@ -420,7 +581,9 @@ export const BUILTIN_THEMES: Record<string, DesktopTheme> = {
   slate: slateTheme
 }
 
-export const BUILTIN_THEME_LIST = Object.values(BUILTIN_THEMES)
+const HIDDEN_THEME_NAMES = new Set(['mia', 'odyssey'])
+
+export const BUILTIN_THEME_LIST = Object.values(BUILTIN_THEMES).filter(theme => !HIDDEN_THEME_NAMES.has(theme.name))
 
 /** Skin used when nothing is persisted or the persisted name is retired. */
-export const DEFAULT_SKIN_NAME = 'nous'
+export const DEFAULT_SKIN_NAME = 'odysseus-mocha'

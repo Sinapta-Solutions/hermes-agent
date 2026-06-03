@@ -1965,14 +1965,145 @@ def get_kanban_task(slug: str, task_id: str):
             "SELECT id, task_id, profile, status, started_at, ended_at, outcome, summary, error FROM task_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 20",
             (task_id,),
         ).fetchall()
+        event_items = [_event_response(row) for row in events]
+        run_items = [dict(row) for row in runs]
+        failures: List[Dict[str, Any]] = []
+        if task["last_failure_error"]:
+            failures.append(
+                {
+                    "source": "task",
+                    "error": task["last_failure_error"],
+                    "run_id": task["current_run_id"],
+                    "started_at": task["started_at"],
+                    "ended_at": task["completed_at"],
+                }
+            )
+        for row in run_items:
+            status = str(row.get("status") or "").lower()
+            error = row.get("error")
+            if error or status in {"error", "failed", "failure"}:
+                failures.append(
+                    {
+                        "source": "run",
+                        "run_id": row.get("id"),
+                        "profile": row.get("profile"),
+                        "started_at": row.get("started_at"),
+                        "ended_at": row.get("ended_at"),
+                        "outcome": row.get("outcome"),
+                        "summary": row.get("summary"),
+                        "error": error or row.get("outcome") or status,
+                    }
+                )
+        for event in event_items:
+            kind = str(event.get("kind") or "").lower()
+            payload = event.get("payload")
+            payload_text = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+            if "fail" in kind or "error" in kind or "traceback" in payload_text.lower():
+                failures.append(
+                    {
+                        "source": "event",
+                        "event_id": event.get("id"),
+                        "run_id": event.get("run_id"),
+                        "kind": event.get("kind"),
+                        "payload": payload,
+                        "error": payload_text[:4000] if payload_text else event.get("kind"),
+                    }
+                )
         return {
             "object": "hermes.kanban.task.detail",
             "task": _task_response(task),
-            "events": [_event_response(row) for row in events],
+            "events": event_items,
             "comments": [dict(row) for row in comments],
             "links": [dict(row) for row in links],
-            "runs": [dict(row) for row in runs],
+            "runs": run_items,
+            "failures": failures[:50],
         }
+    finally:
+        conn.close()
+
+
+@app.post("/api/kanban/boards/{slug}/tasks/{task_id}/comments")
+async def create_kanban_task_comment(slug: str, task_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid task comment payload")
+    comment_body = str(body.get("body") or "").strip()
+    if not comment_body:
+        raise HTTPException(status_code=400, detail="Comment body is required")
+    author = str(body.get("author") or "desktop").strip() or "desktop"
+    now = int(time.time())
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        cursor = conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, author, comment_body, now),
+        )
+        comment_id = cursor.lastrowid
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+            (
+                task_id,
+                "task.comment.created",
+                json.dumps({"source": "desktop", "author": author, "comment_id": comment_id}, ensure_ascii=False),
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, task_id, author, body, created_at FROM task_comments WHERE id = ?",
+            (comment_id,),
+        ).fetchone()
+        return JSONResponse(status_code=201, content={"object": "hermes.kanban.comment", "comment": dict(row)})
+    finally:
+        conn.close()
+
+
+@app.patch("/api/kanban/boards/{slug}/tasks/{task_id}/comments/{comment_id}")
+async def update_kanban_task_comment(slug: str, task_id: str, comment_id: int, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid task comment payload")
+    comment_body = str(body.get("body") or "").strip()
+    if not comment_body:
+        raise HTTPException(status_code=400, detail="Comment body is required")
+    author = str(body.get("author") or "desktop").strip() or "desktop"
+    now = int(time.time())
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        comment = conn.execute(
+            "SELECT id, task_id, author, body, created_at FROM task_comments WHERE id = ? AND task_id = ?",
+            (comment_id, task_id),
+        ).fetchone()
+        if comment is None:
+            raise HTTPException(status_code=404, detail=f"Kanban comment not found: {comment_id}")
+        conn.execute("UPDATE task_comments SET body = ? WHERE id = ? AND task_id = ?", (comment_body, comment_id, task_id))
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+            (
+                task_id,
+                "task.comment.updated",
+                json.dumps({"source": "desktop", "author": author, "comment_id": comment_id}, ensure_ascii=False),
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, task_id, author, body, created_at FROM task_comments WHERE id = ?",
+            (comment_id,),
+        ).fetchone()
+        return {"object": "hermes.kanban.comment", "comment": dict(row)}
     finally:
         conn.close()
 

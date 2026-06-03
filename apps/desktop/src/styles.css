@@ -394,14 +394,15 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  body::before {
+  [data-hermes-ambient-shell]::before {
     content: '';
-    position: fixed;
+    position: absolute;
     z-index: 0;
     inset: 0;
     pointer-events: none;
     opacity: 0;
     filter: blur(var(--odyssey-effect-blur));
+    mix-blend-mode: soft-light;
     transition: opacity 180ms ease;
   }
 
@@ -410,14 +411,19 @@
     z-index: 1;
   }
 
-  :root[data-hermes-background-effect='dots'] body::before {
+  [data-hermes-ambient-shell] > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  :root[data-hermes-background-effect='dots'] [data-hermes-ambient-shell]::before {
     opacity: calc(var(--odyssey-effect-opacity) * 0.75);
     background-image: radial-gradient(circle, color-mix(in srgb, var(--ui-accent) 72%, transparent) 0 0.0625rem, transparent 0.0625rem);
     background-position: 0 0;
     background-size: 1rem 1rem;
   }
 
-  :root[data-hermes-background-effect='rain'] body::before {
+  :root[data-hermes-background-effect='rain'] [data-hermes-ambient-shell]::before {
     opacity: calc(var(--odyssey-effect-opacity) * 0.6);
     background-image: repeating-linear-gradient(
       105deg,
@@ -429,7 +435,7 @@
     animation: odyssey-rain 18s linear infinite;
   }
 
-  :root[data-hermes-background-effect='constellations'] body::before {
+  :root[data-hermes-background-effect='constellations'] [data-hermes-ambient-shell]::before {
     opacity: calc(var(--odyssey-effect-opacity) * 0.9);
     background-image:
       radial-gradient(circle at 15% 20%, color-mix(in srgb, var(--ui-accent) 70%, transparent) 0 0.0625rem, transparent 0.125rem),
@@ -441,7 +447,7 @@
     animation: odyssey-constellations 42s linear infinite;
   }
 
-  :root[data-hermes-background-effect='petals'] body::before {
+  :root[data-hermes-background-effect='petals'] [data-hermes-ambient-shell]::before {
     opacity: calc(var(--odyssey-effect-opacity) * 0.8);
     background-image:
       radial-gradient(ellipse at center, color-mix(in srgb, #f5c2e7 76%, transparent) 0 0.125rem, transparent 0.1875rem),
@@ -451,7 +457,7 @@
     animation: odyssey-petals 34s linear infinite;
   }
 
-  :root[data-hermes-background-effect='sparkles'] body::before {
+  :root[data-hermes-background-effect='sparkles'] [data-hermes-ambient-shell]::before {
     opacity: calc(var(--odyssey-effect-opacity) * 0.95);
     background-image:
       radial-gradient(circle, color-mix(in srgb, #f5c2e7 84%, transparent) 0 0.0625rem, transparent 0.125rem),
@@ -461,7 +467,7 @@
     animation: odyssey-sparkles 3.8s steps(2, end) infinite alternate;
   }
 
-  :root[data-hermes-background-effect='embers'] body::before {
+  :root[data-hermes-background-effect='embers'] [data-hermes-ambient-shell]::before {
     opacity: calc(var(--odyssey-effect-opacity) * 0.85);
     background-image:
       radial-gradient(circle, color-mix(in srgb, #f97316 72%, transparent) 0 0.0625rem, transparent 0.125rem),
@@ -562,8 +568,7 @@
   }
 }
 
-:root[data-hermes-motion='reduced'] body::before,
-:root[data-hermes-motion='reduced'] body::after {
+:root[data-hermes-motion='reduced'] [data-hermes-ambient-shell]::before {
   animation-duration: 90s !important;
 }
 
@@ -573,8 +578,7 @@
   transition-duration: 80ms !important;
 }
 
-:root[data-hermes-motion='off'] body::before,
-:root[data-hermes-motion='off'] body::after,
+:root[data-hermes-motion='off'] [data-hermes-ambient-shell]::before,
 :root[data-hermes-motion='off'] *,
 :root[data-hermes-motion='off'] *::before,
 :root[data-hermes-motion='off'] *::after {

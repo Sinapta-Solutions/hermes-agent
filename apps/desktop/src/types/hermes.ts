@@ -153,9 +153,34 @@ export interface KanbanComment {
   task_id: string
 }
 
+export interface KanbanCommentPayload {
+  author?: string
+  body: string
+}
+
+export interface KanbanCommentMutationResponse {
+  comment: KanbanComment
+  object: 'hermes.kanban.comment'
+}
+
+export interface KanbanFailure {
+  ended_at?: null | number
+  error?: null | string
+  event_id?: number
+  kind?: string
+  outcome?: null | string
+  payload?: KanbanEvent['payload']
+  profile?: null | string
+  run_id?: null | number
+  source: 'event' | 'run' | 'task'
+  started_at?: null | number
+  summary?: null | string
+}
+
 export interface KanbanTaskDetailResponse {
   comments: KanbanComment[]
   events: KanbanEvent[]
+  failures?: KanbanFailure[]
   links: Array<{ child_id: string; parent_id: string }>
   object: 'hermes.kanban.task.detail'
   runs: Array<Record<string, unknown>>

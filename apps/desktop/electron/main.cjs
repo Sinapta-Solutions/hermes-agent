@@ -1266,7 +1266,14 @@ function readMiaUpdateState() {
       installerPath,
       beforeSha: typeof parsed.beforeSha === 'string' ? parsed.beforeSha : null,
       afterSha,
+      // Clean builds use afterSha as the real git commit. Dirty/local M.i.A
+      // builds need a synthetic afterSha so already-installed apps on the
+      // same commit still show the update modal; afterCommit carries the real
+      // commit for the new app to decide when that package is already applied.
+      afterCommit: typeof parsed.afterCommit === 'string' ? parsed.afterCommit : afterSha,
       upstreamSha: typeof parsed.upstreamSha === 'string' ? parsed.upstreamSha : null,
+      packageBuiltAt: typeof parsed.packageBuiltAt === 'string' ? parsed.packageBuiltAt : null,
+      dirty: parsed.dirty === true,
       createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : null,
       branch: typeof parsed.branch === 'string' ? parsed.branch : 'mia-hermes'
     }
@@ -1275,17 +1282,42 @@ function readMiaUpdateState() {
   }
 }
 
+function currentInstalledBuildIdentity() {
+  return {
+    commit: INSTALL_STAMP?.commit || null,
+    builtAt: typeof INSTALL_STAMP?.builtAt === 'string' ? INSTALL_STAMP.builtAt : null,
+    dirty: INSTALL_STAMP?.dirty === true
+  }
+}
+
 function currentInstalledCommit() {
-  return INSTALL_STAMP?.commit || null
+  return currentInstalledBuildIdentity().commit
+}
+
+function sameCommitish(a, b) {
+  return !!a && !!b && (a.startsWith(b) || b.startsWith(a))
 }
 
 function isMiaInstallerPending(state) {
   if (!state?.afterSha) return false
-  const installed = currentInstalledCommit()
-  return !installed || !state.afterSha.startsWith(installed) && !installed.startsWith(state.afterSha)
+  const installed = currentInstalledBuildIdentity()
+  if (!installed.commit) return true
+
+  const targetCommit = state.afterCommit || state.afterSha
+  if (!sameCommitish(targetCommit, installed.commit)) return true
+
+  // A dirty/local installer can intentionally share the same git commit as the
+  // running app. In that case commit comparison is not enough; compare the
+  // packaged build stamp so the update appears once and stops after install.
+  if (state.dirty || state.packageBuiltAt || installed.dirty) {
+    return !state.packageBuiltAt || state.packageBuiltAt !== installed.builtAt
+  }
+
+  return false
 }
 
 function miaPendingUpdateStatus(updateRoot, state) {
+  const targetSha = state.afterCommit || state.afterSha
   return {
     supported: true,
     source: 'mia-installer',
@@ -1293,16 +1325,18 @@ function miaPendingUpdateStatus(updateRoot, state) {
     currentBranch: 'mia-hermes',
     behind: 1,
     currentSha: currentInstalledCommit() || state.beforeSha || undefined,
-    targetSha: state.afterSha,
+    targetSha,
     commits: [
       {
-        sha: state.afterSha,
-        summary: 'M.i.A Hermes update package is ready to install',
+        sha: targetSha,
+        summary: state.dirty
+          ? 'M.i.A Hermes local package is ready to install'
+          : 'M.i.A Hermes update package is ready to install',
         author: 'M.i.A Updater',
         at: state.createdAt ? Date.parse(state.createdAt) || Date.now() : Date.now()
       }
     ],
-    dirty: false,
+    dirty: state.dirty === true,
     hermesRoot: updateRoot,
     installerPath: state.installerPath,
     fetchedAt: Date.now(),
@@ -1491,7 +1525,7 @@ function shellQuote(value) {
 // (`hermes desktop --build-only`), then atomically swap the running .app bundle
 // with the freshly built one and relaunch. Degrades to "backend updated,
 // restart to load the new GUI" if the swap can't be performed.
-async function applyUpdatesPosixInApp(opts = {}) {
+async function applyUpdatesPosixInApp() {
   const updateRoot = resolveUpdateRoot()
   const hermes = resolveHermesCliBinary(updateRoot)
   if (!hermes) {
@@ -2016,7 +2050,9 @@ async function ensureRuntime(backend) {
         stages: [],
         protocolVersion: null
       })
-    } catch {}
+    } catch {
+      // Best-effort progress signal only.
+    }
 
     bootstrapAbortController = new AbortController()
 
@@ -2034,10 +2070,14 @@ async function ensureRuntime(backend) {
         // bootstrap and a log-write failure doesn't suppress the UI signal.
         try {
           rememberLog(`[bootstrap] ${JSON.stringify(ev)}`)
-        } catch {}
+        } catch {
+          // Best-effort diagnostic log only.
+        }
         try {
           broadcastBootstrapEvent(ev)
-        } catch {}
+        } catch {
+          // Renderer may be unavailable during bootstrap.
+        }
       },
       writeMarker: writeBootstrapMarker
     })
@@ -3703,7 +3743,9 @@ ipcMain.handle('hermes:bootstrap:cancel', async () => {
   if (bootstrapAbortController) {
     try {
       bootstrapAbortController.abort()
-    } catch {}
+    } catch {
+      // Abort is best-effort; runBootstrap observes cancellation separately.
+    }
     return { ok: true, cancelled: true }
   }
   return { ok: false, cancelled: false }
@@ -4346,7 +4388,9 @@ app.on('before-quit', () => {
   if (bootstrapAbortController) {
     try {
       bootstrapAbortController.abort()
-    } catch {}
+    } catch {
+      // Quit is already in progress; ignore abort races.
+    }
   }
 
   if (desktopLogFlushTimer) {
