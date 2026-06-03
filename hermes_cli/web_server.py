@@ -1977,6 +1977,85 @@ def get_kanban_task(slug: str, task_id: str):
         conn.close()
 
 
+@app.patch("/api/kanban/boards/{slug}/tasks/{task_id}")
+async def update_kanban_task(slug: str, task_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid task update payload")
+
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+
+        updates: Dict[str, Any] = {}
+        changes: Dict[str, Any] = {}
+
+        if "title" in body:
+            title = str(body.get("title") or "").strip()
+            if not title:
+                raise HTTPException(status_code=400, detail="Task title is required")
+            updates["title"] = title
+        if "body" in body:
+            updates["body"] = str(body.get("body") or "").strip() or None
+        if "assignee" in body:
+            updates["assignee"] = str(body.get("assignee") or "").strip() or None
+        if "tenant" in body:
+            updates["tenant"] = str(body.get("tenant") or "").strip() or None
+        if "workspace_path" in body:
+            updates["workspace_path"] = str(body.get("workspace_path") or "").strip() or None
+        if "workspace_kind" in body:
+            updates["workspace_kind"] = str(body.get("workspace_kind") or "").strip() or "repo"
+        if "priority" in body:
+            try:
+                updates["priority"] = int(body.get("priority") or 0)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid task priority") from None
+        if "status" in body:
+            status = str(body.get("status") or "").strip().lower()
+            if status not in _KANBAN_STATUSES:
+                raise HTTPException(status_code=400, detail="Invalid task status")
+            updates["status"] = status
+            now = int(time.time())
+            if status == "running" and not task["started_at"]:
+                updates["started_at"] = now
+            if status == "done":
+                updates["completed_at"] = now
+            elif task["status"] == "done":
+                updates["completed_at"] = None
+
+        for key, value in updates.items():
+            old_value = task[key]
+            if old_value != value:
+                changes[key] = {"from": old_value, "to": value}
+
+        if changes:
+            assignments = ", ".join(f"{key} = ?" for key in updates)
+            conn.execute(
+                f"UPDATE tasks SET {assignments} WHERE id = ?",
+                (*updates.values(), task_id),
+            )
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    task_id,
+                    "task.updated",
+                    json.dumps({"source": "desktop", "changes": changes}, ensure_ascii=False),
+                    int(time.time()),
+                ),
+            )
+            conn.commit()
+
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return {"object": "hermes.kanban.task", "task": _task_response(row)}
+    finally:
+        conn.close()
+
+
 @app.get("/api/kanban/assignees")
 def list_kanban_assignees():
     names = {"default"}

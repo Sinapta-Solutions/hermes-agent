@@ -3,6 +3,8 @@ import { useStore } from '@nanostores/react'
 import { triggerHaptic } from '@/lib/haptics'
 import { Check, Palette } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { $backgroundEffect, $motionMode, setBackgroundEffect, setMotionMode } from '@/store/appearance'
+import type { BackgroundEffect, MotionMode } from '@/store/appearance'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
 import { useTheme } from '@/themes/context'
 import { BUILTIN_THEMES } from '@/themes/presets'
@@ -10,6 +12,23 @@ import { BUILTIN_THEMES } from '@/themes/presets'
 import { MODE_OPTIONS } from './constants'
 import { prettyName } from './helpers'
 import { Pill, SectionHeading, SettingsContent } from './primitives'
+
+const MOTION_OPTIONS: Array<{ id: MotionMode; label: string; description: string }> = [
+  { id: 'system', label: 'System', description: 'Follow the OS reduced-motion setting.' },
+  { id: 'full', label: 'Full', description: 'Keep ambient backgrounds and UI motion active.' },
+  { id: 'reduced', label: 'Reduced', description: 'Slow down ambient motion and shorten transitions.' },
+  { id: 'off', label: 'Off', description: 'Disable decorative animation across the desktop.' }
+]
+
+const BACKGROUND_EFFECT_OPTIONS: Array<{ id: BackgroundEffect; label: string; description: string; preview: string }> = [
+  { id: 'none', label: 'Solid', description: 'No ambient layer.', preview: 'bg-(--ui-bg-quinary)' },
+  { id: 'dots', label: 'Dots', description: 'Soft tactical dot field.', preview: 'bg-[radial-gradient(circle,var(--ui-accent)_1px,transparent_1px)] bg-[length:10px_10px]' },
+  { id: 'rain', label: 'Rain', description: 'Odysseus midnight streaks.', preview: 'bg-[repeating-linear-gradient(100deg,transparent_0_12px,var(--ui-accent)_13px_14px)]' },
+  { id: 'constellations', label: 'Constellations', description: 'Quiet star-map mesh.', preview: 'bg-[radial-gradient(circle,var(--ui-accent)_1px,transparent_2px)] bg-[length:18px_18px]' },
+  { id: 'petals', label: 'Petals', description: 'Ume-style sakura drift.', preview: 'bg-[radial-gradient(circle_at_30%_30%,#f5c2e7_0_2px,transparent_3px)] bg-[length:16px_16px]' },
+  { id: 'sparkles', label: 'Sparkles', description: 'Subtle assistant shimmer.', preview: 'bg-[radial-gradient(circle,#f5c2e7_0_1px,transparent_2px)] bg-[length:12px_12px]' },
+  { id: 'embers', label: 'Embers', description: 'Warm forge particles.', preview: 'bg-[radial-gradient(circle,#f59e0b_0_1px,transparent_2px)] bg-[length:14px_14px]' }
+]
 
 function ThemePreview({ name }: { name: string }) {
   const t = BUILTIN_THEMES[name]
@@ -54,7 +73,11 @@ function ThemePreview({ name }: { name: string }) {
 export function AppearanceSettings() {
   const { themeName, mode, availableThemes, setTheme, setMode } = useTheme()
   const toolViewMode = useStore($toolViewMode)
+  const motionMode = useStore($motionMode)
+  const backgroundEffect = useStore($backgroundEffect)
   const activeTheme = availableThemes.find(t => t.name === themeName)
+  const activeMotion = MOTION_OPTIONS.find(option => option.id === motionMode)
+  const activeBackgroundEffect = BACKGROUND_EFFECT_OPTIONS.find(option => option.id === backgroundEffect)
 
   return (
     <SettingsContent>
@@ -107,6 +130,96 @@ export function AppearanceSettings() {
                   <div className="mt-2 text-[length:var(--conversation-text-font-size)] font-medium">{label}</div>
                   <div className="mt-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
                     {description}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </section>
+
+
+        <section className="rounded-xl border border-(--ui-stroke-tertiary) bg-(--ui-chat-bubble-background) p-3 shadow-sm">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium">Ambient Background</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Odysseus-inspired patterns applied behind the whole desktop shell.
+              </div>
+            </div>
+            {activeBackgroundEffect && <Pill>{activeBackgroundEffect.label}</Pill>}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {BACKGROUND_EFFECT_OPTIONS.map(option => {
+              const active = backgroundEffect === option.id
+
+              return (
+                <button
+                  className={cn(
+                    'group rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-2.5 text-left transition hover:bg-(--chrome-action-hover)',
+                    active && 'border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary)'
+                  )}
+                  key={option.id}
+                  onClick={() => {
+                    triggerHaptic('selection')
+                    setBackgroundEffect(option.id)
+                  }}
+                  type="button"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <span className={cn('h-10 flex-1 rounded-lg border border-(--ui-stroke-tertiary) opacity-70', option.preview)} />
+                    {active && (
+                      <span className="grid size-5 place-items-center rounded-full bg-primary text-primary-foreground">
+                        <Check className="size-3.5" />
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-2 text-[length:var(--conversation-text-font-size)] font-medium">{option.label}</div>
+                  <div className="mt-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
+                    {option.description}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </section>
+
+        <section className="rounded-xl border border-(--ui-stroke-tertiary) bg-(--ui-chat-bubble-background) p-3 shadow-sm">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium">Animations</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Controls decorative motion, transitions, and Web Animations API enter effects globally.
+              </div>
+            </div>
+            {activeMotion && <Pill>{activeMotion.label}</Pill>}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {MOTION_OPTIONS.map(option => {
+              const active = motionMode === option.id
+
+              return (
+                <button
+                  className={cn(
+                    'group rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-2.5 text-left transition hover:bg-(--chrome-action-hover)',
+                    active && 'border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary)'
+                  )}
+                  key={option.id}
+                  onClick={() => {
+                    triggerHaptic('selection')
+                    setMotionMode(option.id)
+                  }}
+                  type="button"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="text-[length:var(--conversation-text-font-size)] font-medium">{option.label}</div>
+                    {active && (
+                      <span className="grid size-5 place-items-center rounded-full bg-primary text-primary-foreground">
+                        <Check className="size-3.5" />
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
+                    {option.description}
                   </div>
                 </button>
               )

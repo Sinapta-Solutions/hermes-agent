@@ -22,6 +22,7 @@ import type {
   KanbanTaskDetailResponse,
   KanbanTaskMutationResponse,
   KanbanTaskPayload,
+  KanbanTaskUpdatePayload,
   KanbanTasksResponse,
   HermesConfig,
   HermesConfigRecord,
@@ -90,6 +91,7 @@ export type {
   KanbanTaskDetailResponse,
   KanbanTaskMutationResponse,
   KanbanTaskPayload,
+  KanbanTaskUpdatePayload,
   KanbanTasksResponse,
   HermesConfig,
   HermesConfigRecord,
@@ -175,6 +177,16 @@ export function getKanbanTasks(boardSlug: string): Promise<KanbanTasksResponse> 
 export function createKanbanTask(boardSlug: string, body: KanbanTaskPayload): Promise<KanbanTask> {
   return window.hermesDesktop
     .api<KanbanTaskMutationResponse>({ path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks`, method: 'POST', body })
+    .then(result => result.task)
+}
+
+export function updateKanbanTask(boardSlug: string, taskId: string, body: KanbanTaskUpdatePayload): Promise<KanbanTask> {
+  return window.hermesDesktop
+    .api<KanbanTaskMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}`,
+      method: 'PATCH',
+      body
+    })
     .then(result => result.task)
 }
 

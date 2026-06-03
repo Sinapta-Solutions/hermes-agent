@@ -11,6 +11,7 @@ import {
   getKanbanBoards,
   getKanbanTaskDetail,
   getKanbanTasks,
+  updateKanbanTask,
   type KanbanBoard,
   type KanbanEvent,
   type KanbanStatus,
@@ -56,12 +57,6 @@ const STATUSES: Array<{ accent: string; description: string; label: string; valu
   { value: 'done', label: 'Done', description: 'Concluído/revisado', accent: '#c6a0f6' }
 ]
 
-const ODYSSEUS_THEMES = [
-  { name: 'Mocha', background: '#1e1e2e', panel: '#181825', border: '#313244', text: '#cdd6f4', sidebar: '#11111b', accent: '#cba6f7' },
-  { name: 'Macchiato', background: '#24273a', panel: '#1e2030', border: '#363a4f', text: '#cad3f5', sidebar: '#181926', accent: '#c6a0f6' },
-  { name: 'Frappé', background: '#303446', panel: '#292c3c', border: '#414559', text: '#c6d0f5', sidebar: '#232634', accent: '#ca9ee6' }
-]
-
 function formatTime(value?: null | number) {
   if (!value) {
     return '—'
@@ -88,6 +83,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [detail, setDetail] = useState<KanbanTaskDetailResponse | null>(null)
   const [form, setForm] = useState<TaskFormState>(EMPTY_FORM)
+  const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
@@ -95,7 +91,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     () => boards.find(board => board.slug === selectedBoardSlug) ?? boards[0] ?? null,
     [boards, selectedBoardSlug]
   )
-  const selectedTask = useMemo(() => tasks.find(task => task.id === selectedTaskId) ?? tasks[0] ?? null, [selectedTaskId, tasks])
+  const selectedTask = useMemo(() => tasks.find(task => task.id === selectedTaskId) ?? null, [selectedTaskId, tasks])
 
   const refreshBoards = useCallback(async () => {
     const next = await getKanbanBoards()
@@ -106,7 +102,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   const refreshTasks = useCallback(async (slug: string) => {
     const result = await getKanbanTasks(slug)
     setTasks(result.tasks)
-    setSelectedTaskId(current => current ?? result.tasks[0]?.id ?? null)
+    setSelectedTaskId(current => (current && result.tasks.some(task => task.id === current) ? current : null))
   }, [])
 
   const refresh = useCallback(async () => {
@@ -182,6 +178,33 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     }
   }
 
+  const moveTaskStatus = useCallback(
+    async (taskId: string, status: KanbanStatus) => {
+      if (!selectedBoard) {
+        return
+      }
+
+      const task = tasks.find(item => item.id === taskId)
+      if (!task || task.status === status) {
+        return
+      }
+
+      const previousTasks = tasks
+      setTasks(current => current.map(item => (item.id === taskId ? { ...item, status } : item)))
+      setSelectedTaskId(taskId)
+
+      try {
+        const updated = await updateKanbanTask(selectedBoard.slug, taskId, { status })
+        setTasks(current => current.map(item => (item.id === updated.id ? updated : item)))
+        setDetail(current => (current?.task.id === updated.id ? { ...current, task: updated } : current))
+      } catch (error) {
+        setTasks(previousTasks)
+        notifyError(error, 'Failed to move Kanban task')
+      }
+    },
+    [selectedBoard, tasks]
+  )
+
   return (
     <div
       className="relative flex h-full min-h-0 flex-col overflow-hidden pt-(--titlebar-height) text-[#cdd6f4]"
@@ -212,23 +235,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_24rem] overflow-hidden">
-        <main className="min-h-0 overflow-auto p-5">
-          <section className="mb-5 grid gap-3 md:grid-cols-3">
-            {ODYSSEUS_THEMES.map(theme => (
-              <div className="rounded-xl border p-4 shadow-lg" key={theme.name} style={{ background: theme.panel, borderColor: theme.border }}>
-                <div className="flex items-center justify-between text-sm font-semibold" style={{ color: theme.text }}>
-                  <span>Odysseus {theme.name}</span>
-                  <span className="h-3 w-3 rounded-full" style={{ background: theme.accent }} />
-                </div>
-                <div className="mt-3 grid grid-cols-5 gap-1">
-                  {[theme.background, theme.panel, theme.border, theme.sidebar, theme.accent].map(color => (
-                    <span className="h-5 rounded" key={color} style={{ background: color }} title={color} />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </section>
-
+        <main className="min-h-0 overflow-auto p-5" onClick={() => setSelectedTaskId(null)}>
           {loading ? (
             <div className="rounded-xl border border-[#313244] bg-[#181825] p-6 text-sm text-[#a6adc8]">Carregando Kanban…</div>
           ) : !selectedBoard ? (
@@ -238,7 +245,25 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
               {STATUSES.map(column => {
                 const columnTasks = tasks.filter(task => task.status === column.value)
                 return (
-                  <section className="min-h-[28rem] rounded-2xl border border-[#313244] bg-[#181825]/90 p-3" key={column.value}>
+                  <section
+                    className={cn(
+                      'min-h-[28rem] rounded-2xl border border-[#313244] bg-[#181825]/90 p-3 transition',
+                      draggingTaskId && 'border-[#cba6f7]/50 bg-[#1e1e2e]'
+                    )}
+                    key={column.value}
+                    onDragOver={event => {
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = 'move'
+                    }}
+                    onDrop={event => {
+                      event.preventDefault()
+                      const taskId = event.dataTransfer.getData('application/x-hermes-kanban-task') || event.dataTransfer.getData('text/plain')
+                      setDraggingTaskId(null)
+                      if (taskId) {
+                        void moveTaskStatus(taskId, column.value)
+                      }
+                    }}
+                  >
                     <div className="mb-3 flex items-start justify-between gap-2">
                       <div>
                         <div className="flex items-center gap-2 text-sm font-semibold text-[#f5e0dc]">
@@ -253,8 +278,16 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                       {columnTasks.map(task => (
                         <TaskCard
                           active={selectedTask?.id === task.id}
+                          dragging={draggingTaskId === task.id}
                           key={task.id}
-                          onClick={() => setSelectedTaskId(task.id)}
+                          onDragEnd={() => setDraggingTaskId(null)}
+                          onDragStart={event => {
+                            event.dataTransfer.effectAllowed = 'move'
+                            event.dataTransfer.setData('application/x-hermes-kanban-task', task.id)
+                            event.dataTransfer.setData('text/plain', task.id)
+                            setDraggingTaskId(task.id)
+                          }}
+                          onSelect={() => setSelectedTaskId(task.id)}
                           task={task}
                         />
                       ))}
@@ -337,14 +370,39 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   )
 }
 
-function TaskCard({ active, onClick, task }: { active: boolean; onClick: () => void; task: KanbanTask }) {
+function TaskCard({
+  active,
+  dragging,
+  onDragEnd,
+  onDragStart,
+  onSelect,
+  task
+}: {
+  active: boolean
+  dragging: boolean
+  onDragEnd: () => void
+  onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void
+  onSelect: () => void
+  task: KanbanTask
+}) {
   return (
     <button
       className={cn(
         'rounded-xl border border-[#313244] bg-[#1e1e2e] p-3 text-left shadow-sm transition hover:border-[#cba6f7]/60 hover:bg-[#24273a]',
-        active && 'border-[#cba6f7] shadow-[0_0_0_1px_rgba(203,166,247,.35)]'
+        active && 'border-[#cba6f7] shadow-[0_0_0_1px_rgba(203,166,247,.35)]',
+        dragging && 'opacity-55 ring-1 ring-[#cba6f7]/40'
       )}
-      onClick={onClick}
+      data-kanban-card="true"
+      draggable
+      onClick={event => {
+        event.stopPropagation()
+        onSelect()
+      }}
+      onDragEnd={onDragEnd}
+      onDragStart={event => {
+        event.stopPropagation()
+        onDragStart(event)
+      }}
       type="button"
     >
       <div className="line-clamp-2 text-sm font-medium text-[#cdd6f4]">{task.title}</div>

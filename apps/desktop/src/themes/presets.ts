@@ -126,6 +126,145 @@ export const midnightTheme: DesktopTheme = {
   }
 }
 
+/** Odysseus-inspired Catppuccin command center: navy, lavender, and soft rose. */
+export const odysseyTheme: DesktopTheme = {
+  name: 'odyssey',
+  label: 'Odyssey',
+  description: 'Odysseus/Catppuccin command center',
+  colors: {
+    background: '#11111b',
+    foreground: '#cdd6f4',
+    card: '#181825',
+    cardForeground: '#cdd6f4',
+    muted: '#1e1e2e',
+    mutedForeground: '#9399b2',
+    popover: '#181825',
+    popoverForeground: '#cdd6f4',
+    primary: '#b4befe',
+    primaryForeground: '#11111b',
+    secondary: '#313244',
+    secondaryForeground: '#cdd6f4',
+    accent: '#302d41',
+    accentForeground: '#f5c2e7',
+    border: '#45475a',
+    input: '#45475a',
+    ring: '#b4befe',
+    midground: '#cba6f7',
+    composerRing: '#f5c2e7',
+    destructive: '#f38ba8',
+    destructiveForeground: '#11111b',
+    sidebarBackground: '#0b0b14',
+    sidebarBorder: '#313244',
+    userBubble: '#242235',
+    userBubbleBorder: '#6c7086'
+  },
+  typography: {
+    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`,
+    fontUrl: 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap'
+  }
+}
+
+/** Ume — deep plum and sakura pink from the Odysseus presets. */
+export const umeTheme: DesktopTheme = {
+  name: 'ume',
+  label: 'Ume',
+  description: 'Deep plum with sakura pink accents',
+  colors: {
+    background: '#2b1b2e',
+    foreground: '#f5c2e7',
+    card: '#1e1420',
+    cardForeground: '#f5c2e7',
+    muted: '#312038',
+    mutedForeground: '#b58aba',
+    popover: '#1e1420',
+    popoverForeground: '#f5c2e7',
+    primary: '#f5c2e7',
+    primaryForeground: '#1e1420',
+    secondary: '#3a2740',
+    secondaryForeground: '#f0d4ef',
+    accent: '#44284d',
+    accentForeground: '#f5a0c0',
+    border: '#6c4675',
+    input: '#6c4675',
+    ring: '#f5a0c0',
+    midground: '#f5a0c0',
+    composerRing: '#f5c2e7',
+    destructive: '#e86488',
+    destructiveForeground: '#1e1420',
+    sidebarBackground: '#190f1c',
+    sidebarBorder: '#3a2740',
+    userBubble: '#38213f',
+    userBubbleBorder: '#6c4675'
+  },
+  typography: {
+    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`
+  }
+}
+
+/** Lavender — soft pastel variant for lighter Odysseus/Catppuccin sessions. */
+export const lavenderTheme: DesktopTheme = {
+  name: 'lavender',
+  label: 'Lavender',
+  description: 'Soft lavender glass with violet accents',
+  colors: {
+    background: '#f3eef8',
+    foreground: '#3d3551',
+    card: '#faf7ff',
+    cardForeground: '#3d3551',
+    muted: '#ece4f4',
+    mutedForeground: '#75698d',
+    popover: '#faf7ff',
+    popoverForeground: '#3d3551',
+    primary: '#9b6dcc',
+    primaryForeground: '#ffffff',
+    secondary: '#e5d9ef',
+    secondaryForeground: '#4d4264',
+    accent: '#eadff5',
+    accentForeground: '#5d4b78',
+    border: '#cec3de',
+    input: '#cec3de',
+    ring: '#9b6dcc',
+    midground: '#9b6dcc',
+    composerRing: '#9b6dcc',
+    destructive: '#c45a83',
+    destructiveForeground: '#ffffff',
+    sidebarBackground: '#eee6f5',
+    sidebarBorder: '#d6c8e6',
+    userBubble: '#f7edff',
+    userBubbleBorder: '#d8c4ea'
+  },
+  darkColors: {
+    background: '#191521',
+    foreground: '#f3e8ff',
+    card: '#21182a',
+    cardForeground: '#f3e8ff',
+    muted: '#2a2035',
+    mutedForeground: '#b7a2cb',
+    popover: '#21182a',
+    popoverForeground: '#f3e8ff',
+    primary: '#cba6f7',
+    primaryForeground: '#191521',
+    secondary: '#352541',
+    secondaryForeground: '#e4d1f7',
+    accent: '#3a2648',
+    accentForeground: '#f5c2e7',
+    border: '#4b365e',
+    input: '#4b365e',
+    ring: '#cba6f7',
+    midground: '#cba6f7',
+    composerRing: '#f5c2e7',
+    destructive: '#f38ba8',
+    destructiveForeground: '#191521',
+    sidebarBackground: '#14111c',
+    sidebarBorder: '#332541',
+    userBubble: '#281d34',
+    userBubbleBorder: '#4b365e'
+  },
+  typography: {
+    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`
+  }
+}
+
 /** Warm crimson and bronze — forge vibes. Matches the CLI ares skin. */
 export const emberTheme: DesktopTheme = {
   name: 'ember',
@@ -272,6 +411,9 @@ export const slateTheme: DesktopTheme = {
 export const BUILTIN_THEMES: Record<string, DesktopTheme> = {
   nous: nousTheme,
   midnight: midnightTheme,
+  odyssey: odysseyTheme,
+  ume: umeTheme,
+  lavender: lavenderTheme,
   ember: emberTheme,
   mono: monoTheme,
   cyberpunk: cyberpunkTheme,

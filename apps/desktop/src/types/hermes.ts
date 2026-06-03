@@ -120,6 +120,17 @@ export interface KanbanTaskPayload {
   workspace_path?: null | string
 }
 
+export interface KanbanTaskUpdatePayload {
+  assignee?: null | string
+  body?: null | string
+  priority?: number
+  status?: KanbanStatus
+  tenant?: null | string
+  title?: string
+  workspace_kind?: string
+  workspace_path?: null | string
+}
+
 export interface KanbanTaskMutationResponse {
   object: 'hermes.kanban.task'
   task: KanbanTask

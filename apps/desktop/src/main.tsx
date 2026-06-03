@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router-dom'
 
 import App from './app'
+import { AppearanceProvider } from './components/appearance-provider'
 import { ErrorBoundary } from './components/error-boundary'
 import { HapticsProvider } from './components/haptics-provider'
 import { installClipboardShim } from './lib/clipboard'
@@ -36,11 +37,13 @@ createRoot(document.getElementById('root')!).render(
     <ErrorBoundary label="root">
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
-          <HapticsProvider>
-            <HashRouter>
-              <App />
-            </HashRouter>
-          </HapticsProvider>
+          <AppearanceProvider>
+            <HapticsProvider>
+              <HashRouter>
+                <App />
+              </HashRouter>
+            </HapticsProvider>
+          </AppearanceProvider>
         </ThemeProvider>
       </QueryClientProvider>
     </ErrorBoundary>
