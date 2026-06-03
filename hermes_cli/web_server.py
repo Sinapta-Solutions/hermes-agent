@@ -1750,6 +1750,244 @@ def workspace_events(workspace_id: str, limit: int = 25):
     return {"object": "list", "events": events, "limit": bounded_limit}
 
 
+# ---------------------------------------------------------------------------
+# Native M.i.A Kanban — dashboard/Desktop API surface
+# ---------------------------------------------------------------------------
+
+_KANBAN_STATUSES = ("triage", "todo", "scheduled", "ready", "running", "blocked", "done")
+
+
+def _kanban_root() -> Path:
+    return get_hermes_home() / "kanban"
+
+
+def _kanban_boards_root() -> Path:
+    return _kanban_root() / "boards"
+
+
+def _safe_board_slug(slug: str) -> str:
+    value = (slug or "").strip().lower()
+    if not re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", value):
+        raise HTTPException(status_code=400, detail="Invalid board slug")
+    return value
+
+
+def _board_dir(slug: str) -> Path:
+    return _kanban_boards_root() / _safe_board_slug(slug)
+
+
+def _board_db_path(slug: str) -> Path:
+    return _board_dir(slug) / "kanban.db"
+
+
+def _read_board_meta(slug: str) -> Optional[Dict[str, Any]]:
+    board_dir = _board_dir(slug)
+    meta_path = board_dir / "board.json"
+    if not meta_path.exists():
+        return None
+    try:
+        raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    raw.setdefault("slug", slug)
+    raw.setdefault("name", slug.replace("-", " ").title())
+    raw.setdefault("description", None)
+    raw.setdefault("icon", "◫")
+    raw.setdefault("color", "#cba6f7")
+    raw.setdefault("default_workdir", None)
+    raw["archived"] = bool(raw.get("archived"))
+    raw["db_path"] = str(_board_db_path(slug))
+    return raw
+
+
+def _connect_kanban_board(slug: str) -> sqlite3.Connection:
+    db_path = _board_db_path(slug)
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail=f"Kanban board not found: {slug}")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def _task_response(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "body": row["body"],
+        "assignee": row["assignee"],
+        "status": row["status"],
+        "priority": row["priority"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "completed_at": row["completed_at"],
+        "workspace_kind": row["workspace_kind"],
+        "workspace_path": row["workspace_path"],
+        "branch_name": row["branch_name"],
+        "tenant": row["tenant"],
+        "result": row["result"],
+        "consecutive_failures": row["consecutive_failures"],
+        "last_failure_error": row["last_failure_error"],
+        "worker_pid": row["worker_pid"],
+        "last_heartbeat_at": row["last_heartbeat_at"],
+        "current_run_id": row["current_run_id"],
+        "skills": row["skills"],
+        "model_override": row["model_override"],
+        "goal_mode": bool(row["goal_mode"]),
+        "goal_max_turns": row["goal_max_turns"],
+        "session_id": row["session_id"],
+    }
+
+
+def _event_response(row: sqlite3.Row) -> Dict[str, Any]:
+    try:
+        payload = json.loads(row["payload"]) if row["payload"] else None
+    except Exception:
+        payload = row["payload"]
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "run_id": row["run_id"],
+        "kind": row["kind"],
+        "payload": payload,
+        "created_at": row["created_at"],
+    }
+
+
+@app.get("/api/kanban/boards")
+def list_kanban_boards():
+    boards_root = _kanban_boards_root()
+    boards: List[Dict[str, Any]] = []
+    if boards_root.exists():
+        for child in sorted(boards_root.iterdir(), key=lambda p: p.name.lower()):
+            if not child.is_dir():
+                continue
+            meta = _read_board_meta(child.name)
+            if not meta or meta.get("archived"):
+                continue
+            counts = {status: 0 for status in _KANBAN_STATUSES}
+            db_path = _board_db_path(child.name)
+            if db_path.exists():
+                try:
+                    conn = _connect_kanban_board(child.name)
+                    try:
+                        for row in conn.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status"):
+                            counts[row["status"]] = row["count"]
+                    finally:
+                        conn.close()
+                except Exception:
+                    _log.exception("Failed to read kanban board counts for %s", child.name)
+            meta["task_counts"] = counts
+            meta["task_total"] = sum(counts.values())
+            boards.append(meta)
+    return {"object": "list", "boards": boards}
+
+
+@app.get("/api/kanban/boards/{slug}/tasks")
+def list_kanban_tasks(slug: str):
+    conn = _connect_kanban_board(slug)
+    try:
+        rows = conn.execute("SELECT * FROM tasks ORDER BY priority DESC, created_at DESC").fetchall()
+        tasks = [_task_response(row) for row in rows]
+        counts = {status: 0 for status in _KANBAN_STATUSES}
+        for task in tasks:
+            counts[task["status"]] = counts.get(task["status"], 0) + 1
+        return {"object": "list", "board": _read_board_meta(slug), "tasks": tasks, "task_counts": counts}
+    finally:
+        conn.close()
+
+
+@app.post("/api/kanban/boards/{slug}/tasks")
+async def create_kanban_task(slug: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    title = str(body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Task title is required")
+    assignee = str(body.get("assignee") or "").strip() or None
+    task_body = str(body.get("body") or "").strip() or None
+    status = str(body.get("status") or "ready").strip().lower()
+    if status not in _KANBAN_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid task status")
+    try:
+        priority = int(body.get("priority") or 0)
+    except Exception:
+        priority = 0
+    tenant = str(body.get("tenant") or "").strip() or None
+    workspace_path = str(body.get("workspace_path") or "").strip() or None
+    workspace_kind = str(body.get("workspace_kind") or "repo").strip() or "repo"
+    task_id = f"t_{uuid.uuid4().hex[:12]}"
+    now = int(time.time())
+    conn = _connect_kanban_board(slug)
+    try:
+        conn.execute(
+            """
+            INSERT INTO tasks (id, title, body, assignee, status, priority, created_by, created_at,
+                               workspace_kind, workspace_path, tenant)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (task_id, title, task_body, assignee, status, priority, "desktop", now, workspace_kind, workspace_path, tenant),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, "task.created", json.dumps({"source": "desktop", "status": status}, ensure_ascii=False), now),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return JSONResponse(status_code=201, content={"object": "hermes.kanban.task", "task": _task_response(row)})
+    finally:
+        conn.close()
+
+
+@app.get("/api/kanban/boards/{slug}/tasks/{task_id}")
+def get_kanban_task(slug: str, task_id: str):
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        events = conn.execute(
+            "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC, id DESC LIMIT 50",
+            (task_id,),
+        ).fetchall()
+        comments = conn.execute(
+            "SELECT id, task_id, author, body, created_at FROM task_comments WHERE task_id = ? ORDER BY created_at DESC LIMIT 50",
+            (task_id,),
+        ).fetchall()
+        links = conn.execute(
+            "SELECT parent_id, child_id FROM task_links WHERE parent_id = ? OR child_id = ? ORDER BY parent_id, child_id",
+            (task_id, task_id),
+        ).fetchall()
+        runs = conn.execute(
+            "SELECT id, task_id, profile, status, started_at, ended_at, outcome, summary, error FROM task_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 20",
+            (task_id,),
+        ).fetchall()
+        return {
+            "object": "hermes.kanban.task.detail",
+            "task": _task_response(task),
+            "events": [_event_response(row) for row in events],
+            "comments": [dict(row) for row in comments],
+            "links": [dict(row) for row in links],
+            "runs": [dict(row) for row in runs],
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/kanban/assignees")
+def list_kanban_assignees():
+    names = {"default"}
+    profiles_root = get_hermes_home() / "profiles"
+    if profiles_root.exists():
+        for child in profiles_root.iterdir():
+            if child.is_dir() and not child.name.startswith("."):
+                names.add(child.name)
+    return {"object": "list", "assignees": sorted(names)}
+
+
 @app.get("/api/sessions")
 async def get_sessions(
     limit: int = 20,

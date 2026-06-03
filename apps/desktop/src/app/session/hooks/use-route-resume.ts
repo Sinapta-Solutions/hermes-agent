@@ -37,6 +37,7 @@ function rawHashLooksLikeSession(): boolean {
     !hash.startsWith('/skills') &&
     !hash.startsWith('/agents') &&
     !hash.startsWith('/workspaces') &&
+    !hash.startsWith('/kanban') &&
     !hash.startsWith('/messaging') &&
     !hash.startsWith('/artifacts')
   )

@@ -53,6 +53,109 @@ export interface WorkspaceEventsResponse {
   object: 'list'
 }
 
+export type KanbanStatus = 'triage' | 'todo' | 'scheduled' | 'ready' | 'running' | 'blocked' | 'done'
+
+export interface KanbanBoard {
+  archived: boolean
+  color?: null | string
+  created_at?: number
+  db_path?: string
+  default_workdir?: null | string
+  description?: null | string
+  icon?: null | string
+  name: string
+  slug: string
+  task_counts: Record<string, number>
+  task_total: number
+}
+
+export interface KanbanBoardsResponse {
+  boards: KanbanBoard[]
+  object: 'list'
+}
+
+export interface KanbanTask {
+  assignee?: null | string
+  body?: null | string
+  branch_name?: null | string
+  completed_at?: null | number
+  consecutive_failures: number
+  created_at: number
+  created_by?: null | string
+  current_run_id?: null | number
+  goal_max_turns?: null | number
+  goal_mode: boolean
+  id: string
+  last_failure_error?: null | string
+  last_heartbeat_at?: null | number
+  model_override?: null | string
+  priority: number
+  result?: null | string
+  session_id?: null | string
+  skills?: null | string
+  started_at?: null | number
+  status: KanbanStatus
+  tenant?: null | string
+  title: string
+  worker_pid?: null | number
+  workspace_kind: string
+  workspace_path?: null | string
+}
+
+export interface KanbanTasksResponse {
+  board: KanbanBoard | null
+  object: 'list'
+  task_counts: Record<string, number>
+  tasks: KanbanTask[]
+}
+
+export interface KanbanTaskPayload {
+  assignee?: null | string
+  body?: null | string
+  priority?: number
+  status?: KanbanStatus
+  tenant?: null | string
+  title: string
+  workspace_kind?: string
+  workspace_path?: null | string
+}
+
+export interface KanbanTaskMutationResponse {
+  object: 'hermes.kanban.task'
+  task: KanbanTask
+}
+
+export interface KanbanEvent {
+  created_at: number
+  id: number
+  kind: string
+  payload?: null | string | Record<string, unknown>
+  run_id?: null | number
+  task_id: string
+}
+
+export interface KanbanComment {
+  author: string
+  body: string
+  created_at: number
+  id: number
+  task_id: string
+}
+
+export interface KanbanTaskDetailResponse {
+  comments: KanbanComment[]
+  events: KanbanEvent[]
+  links: Array<{ child_id: string; parent_id: string }>
+  object: 'hermes.kanban.task.detail'
+  runs: Array<Record<string, unknown>>
+  task: KanbanTask
+}
+
+export interface KanbanAssigneesResponse {
+  assignees: string[]
+  object: 'list'
+}
+
 export interface ConfigFieldSchema {
   category?: string
   description?: string

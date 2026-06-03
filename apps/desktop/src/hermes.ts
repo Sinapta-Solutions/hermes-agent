@@ -13,6 +13,16 @@ import type {
   CronJobUpdates,
   ElevenLabsVoicesResponse,
   EnvVarInfo,
+  KanbanAssigneesResponse,
+  KanbanBoard,
+  KanbanBoardsResponse,
+  KanbanEvent,
+  KanbanTask,
+  KanbanStatus,
+  KanbanTaskDetailResponse,
+  KanbanTaskMutationResponse,
+  KanbanTaskPayload,
+  KanbanTasksResponse,
   HermesConfig,
   HermesConfigRecord,
   LogsResponse,
@@ -71,6 +81,16 @@ export type {
   ElevenLabsVoicesResponse,
   EnvVarInfo,
   GatewayReadyPayload,
+  KanbanAssigneesResponse,
+  KanbanBoard,
+  KanbanBoardsResponse,
+  KanbanEvent,
+  KanbanTask,
+  KanbanStatus,
+  KanbanTaskDetailResponse,
+  KanbanTaskMutationResponse,
+  KanbanTaskPayload,
+  KanbanTasksResponse,
   HermesConfig,
   HermesConfigRecord,
   LogsResponse,
@@ -142,6 +162,30 @@ export function getWorkspaceEvents(id: string, limit = 25): Promise<WorkspaceEve
   return window.hermesDesktop.api<WorkspaceEventsResponse>({
     path: `/api/workspaces/${encodeURIComponent(id)}/events?limit=${limit}`
   })
+}
+
+export function getKanbanBoards(): Promise<KanbanBoard[]> {
+  return window.hermesDesktop.api<KanbanBoardsResponse>({ path: '/api/kanban/boards' }).then(result => result.boards)
+}
+
+export function getKanbanTasks(boardSlug: string): Promise<KanbanTasksResponse> {
+  return window.hermesDesktop.api<KanbanTasksResponse>({ path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks` })
+}
+
+export function createKanbanTask(boardSlug: string, body: KanbanTaskPayload): Promise<KanbanTask> {
+  return window.hermesDesktop
+    .api<KanbanTaskMutationResponse>({ path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks`, method: 'POST', body })
+    .then(result => result.task)
+}
+
+export function getKanbanTaskDetail(boardSlug: string, taskId: string): Promise<KanbanTaskDetailResponse> {
+  return window.hermesDesktop.api<KanbanTaskDetailResponse>({
+    path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}`
+  })
+}
+
+export function getKanbanAssignees(): Promise<string[]> {
+  return window.hermesDesktop.api<KanbanAssigneesResponse>({ path: '/api/kanban/assignees' }).then(result => result.assignees)
 }
 
 export class HermesGateway extends JsonRpcGatewayClient {
