@@ -41,8 +41,15 @@
     "lint:fix": "eslint src/ electron/ --fix",
     "fmt": "prettier --write 'src/**/*.{ts,tsx}' 'electron/**/*.{js,cjs}' 'vite.config.ts'",
     "fix": "npm run lint:fix && npm run fmt",
-    "test:ui": "vitest run --environment jsdom",
-    "preview": "node scripts/assert-root-install.cjs && vite preview --host 127.0.0.1 --port 4174"
+    "test:ui": "vitest run src --environment jsdom",
+    "preview": "node scripts/assert-root-install.cjs && vite preview --host 127.0.0.1 --port 4174",
+    "validate:desktop:quick": "npm run type-check && npm run build",
+    "validate:desktop": "npm run type-check && npm run test:ui && npm run test:desktop:platforms && npm run build",
+    "github:auth:status": "gh auth status",
+    "github:pr:status": "gh pr status",
+    "github:ci:list": "gh run list --limit 10",
+    "github:ci:watch": "gh run watch",
+    "github:release:list": "gh release list --limit 10"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.12.28",

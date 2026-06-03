@@ -98,13 +98,30 @@ The packaged app ships only the Electron shell. On first launch it installs the 
 
 ### Verification
 
-Run before opening a PR (lint may surface pre-existing warnings but must exit cleanly):
+Fast local validation for Desktop work:
 
 ```bash
-npm run fix
-npm run type-check
-npm run lint
-npm run test:desktop:all
+npm run validate:desktop:quick
+```
+
+Full Desktop validation used before packaging or handoff:
+
+```bash
+npm run validate:desktop
+```
+
+`npm run test:ui` is scoped to the `src` tree so generated
+`release-*` / packaged native dependency tests are not picked up by Vitest.
+Use `npm run lint` or targeted `npx eslint <files> --max-warnings=0` when touching
+lint-sensitive files; the current branch still has inherited full-tree lint debt.
+
+GitHub operations should use the authenticated GitHub CLI:
+
+```bash
+npm run github:auth:status
+npm run github:pr:status
+npm run github:ci:list
+npm run github:release:list
 ```
 
 ### Troubleshooting

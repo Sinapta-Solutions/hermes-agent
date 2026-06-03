@@ -10,7 +10,15 @@
     "web"
   ],
   "scripts": {
-    "postinstall": "echo '✅ Browser tools ready. Run: python run_agent.py --help'"
+    "postinstall": "echo '✅ Browser tools ready. Run: python run_agent.py --help'",
+    "desktop:validate": "npm --workspace apps/desktop run validate:desktop",
+    "desktop:validate:quick": "npm --workspace apps/desktop run validate:desktop:quick",
+    "desktop:test:ui": "npm --workspace apps/desktop run test:ui",
+    "github:auth:status": "gh auth status",
+    "github:pr:status": "gh pr status",
+    "github:ci:list": "gh run list --limit 10",
+    "github:ci:watch": "gh run watch",
+    "github:release:list": "gh release list --limit 10"
   },
   "repository": {
     "type": "git",
