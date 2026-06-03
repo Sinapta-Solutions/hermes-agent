@@ -61,13 +61,13 @@ const EMPTY_FORM: TaskFormState = {
 }
 
 const STATUSES: Array<{ accent: string; description: string; label: string; value: KanbanStatus }> = [
-  { value: 'triage', label: 'Triage', description: 'Entrada bruta para especificar', accent: '#f5a97f' },
-  { value: 'todo', label: 'Todo', description: 'Pronto depois de dependências', accent: '#eed49f' },
-  { value: 'scheduled', label: 'Scheduled', description: 'Aguardando janela/tempo', accent: '#8aadf4' },
-  { value: 'ready', label: 'Ready', description: 'Dispatcher pode pegar', accent: '#a6da95' },
-  { value: 'running', label: 'Running', description: 'Perfil executando agora', accent: '#8bd5ca' },
-  { value: 'blocked', label: 'Blocked', description: 'Precisa intervenção', accent: '#ed8796' },
-  { value: 'done', label: 'Done', description: 'Concluído/revisado', accent: '#c6a0f6' }
+  { value: 'triage', label: 'Triage', description: 'Entrada bruta para especificar', accent: 'var(--ui-orange)' },
+  { value: 'todo', label: 'Todo', description: 'Pronto depois de dependências', accent: 'var(--ui-yellow)' },
+  { value: 'scheduled', label: 'Scheduled', description: 'Aguardando janela/tempo', accent: 'var(--ui-blue)' },
+  { value: 'ready', label: 'Ready', description: 'Dispatcher pode pegar', accent: 'var(--ui-green)' },
+  { value: 'running', label: 'Running', description: 'Perfil executando agora', accent: 'var(--ui-cyan)' },
+  { value: 'blocked', label: 'Blocked', description: 'Precisa intervenção', accent: 'var(--ui-red)' },
+  { value: 'done', label: 'Done', description: 'Concluído/revisado', accent: 'var(--ui-accent)' }
 ]
 
 function formatTime(value?: null | number) {
@@ -268,23 +268,20 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   )
 
   return (
-    <div
-      className="relative flex h-full min-h-0 flex-col overflow-hidden pt-(--titlebar-height) text-[#cdd6f4]"
-      style={{ background: 'radial-gradient(circle at top left, rgba(203,166,247,.22), transparent 30%), #1e1e2e' }}
-    >
-      <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#313244] bg-[#11111b]/85 px-6 py-5 backdrop-blur">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-(--ui-chat-surface-background) pt-(--titlebar-height) text-(--ui-text-primary)">
+      <div className="flex shrink-0 flex-wrap items-start justify-between gap-4 border-b border-(--ui-stroke-secondary) bg-(--ui-chat-surface-background) px-6 py-5 backdrop-blur">
         <div>
-          <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-[#cba6f7]">
+          <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-(--ui-accent)">
             <Codicon name="project" /> M.i.A command board
           </div>
-          <h1 className="mt-2 text-2xl font-semibold text-[#f5e0dc]">Kanban</h1>
-          <p className="mt-1 max-w-3xl text-sm text-[#bac2de]">
+          <h1 className="mt-2 text-2xl font-semibold text-(--ui-text-primary)">Kanban</h1>
+          <p className="mt-1 max-w-3xl text-sm text-(--ui-text-secondary)">
             Painel nativo da orquestração. Clique para selecionar; duplo clique ou botão abre detalhes completos.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <select
-            className="h-9 rounded-lg border border-[#313244] bg-[#181825] px-3 text-sm text-[#cdd6f4] outline-none"
+            className="h-9 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) px-3 text-sm text-(--ui-text-primary) outline-none"
             onChange={event => setSelectedBoardSlug(event.target.value)}
             value={selectedBoard?.slug ?? ''}
           >
@@ -305,9 +302,11 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
 
       <main className="min-h-0 flex-1 overflow-auto p-5" onClick={() => setSelectedTaskId(null)}>
         {loading ? (
-          <div className="rounded-xl border border-[#313244] bg-[#181825] p-6 text-sm text-[#a6adc8]">Carregando Kanban…</div>
+          <div className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-6 text-sm text-(--ui-text-tertiary)">
+            Carregando Kanban…
+          </div>
         ) : !selectedBoard ? (
-          <div className="rounded-xl border border-dashed border-[#45475a] bg-[#181825] p-6 text-sm text-[#a6adc8]">
+          <div className="rounded-xl border border-dashed border-(--ui-stroke-primary) bg-(--ui-bg-elevated) p-6 text-sm text-(--ui-text-tertiary)">
             Nenhum board Kanban encontrado ainda.
           </div>
         ) : (
@@ -318,8 +317,8 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
               return (
                 <section
                   className={cn(
-                    'min-h-[28rem] rounded-2xl border border-[#313244] bg-[#181825]/90 p-3 transition',
-                    draggingTaskId && 'border-[#cba6f7]/50 bg-[#1e1e2e]'
+                    'min-h-[28rem] rounded-2xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 transition',
+                    draggingTaskId && 'border-(--ui-accent) bg-(--ui-bg-secondary)'
                   )}
                   key={column.value}
                   onDragOver={event => {
@@ -330,7 +329,8 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                     event.preventDefault()
 
                     const taskId =
-                      event.dataTransfer.getData('application/x-hermes-kanban-task') || event.dataTransfer.getData('text/plain')
+                      event.dataTransfer.getData('application/x-hermes-kanban-task') ||
+                      event.dataTransfer.getData('text/plain')
 
                     setDraggingTaskId(null)
 
@@ -341,13 +341,15 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                 >
                   <div className="mb-3 flex items-start justify-between gap-2">
                     <div>
-                      <div className="flex items-center gap-2 text-sm font-semibold text-[#f5e0dc]">
+                      <div className="flex items-center gap-2 text-sm font-semibold text-(--ui-text-primary)">
                         <span className="h-2.5 w-2.5 rounded-full" style={{ background: column.accent }} />
                         {column.label}
                       </div>
-                      <div className="mt-1 text-[0.68rem] leading-tight text-[#a6adc8]">{column.description}</div>
+                      <div className="mt-1 text-[0.68rem] leading-tight text-(--ui-text-tertiary)">
+                        {column.description}
+                      </div>
                     </div>
-                    <span className="rounded-full border border-[#313244] px-2 py-0.5 text-xs text-[#cba6f7]">
+                    <span className="rounded-full border border-(--ui-stroke-secondary) px-2 py-0.5 text-xs text-(--ui-accent)">
                       {taskCount(tasks, column.value)}
                     </span>
                   </div>
@@ -370,7 +372,9 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                       />
                     ))}
                     {columnTasks.length === 0 && (
-                      <div className="rounded-lg border border-dashed border-[#313244] p-3 text-xs text-[#6c7086]">Vazio</div>
+                      <div className="rounded-lg border border-dashed border-(--ui-stroke-secondary) p-3 text-xs text-(--ui-text-quaternary)">
+                        Vazio
+                      </div>
                     )}
                   </div>
                 </section>
@@ -430,22 +434,22 @@ function CreateTaskDialog({
 }) {
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-w-2xl border-[#313244] bg-[#181825] text-[#cdd6f4]">
+      <DialogContent className="max-w-2xl border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) text-(--ui-text-primary)">
         <DialogHeader>
-          <DialogTitle className="text-[#f5e0dc]">Novo card</DialogTitle>
+          <DialogTitle className="text-(--ui-text-primary)">Novo card</DialogTitle>
           <DialogDescription>Cria uma tarefa scoped para o dispatcher da M.i.A.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-3">
           <Field label="Título">
             <Input
-              className="border-[#313244] bg-[#1e1e2e] text-[#cdd6f4]"
+              className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
               onChange={event => setForm(prev => ({ ...prev, title: event.target.value }))}
               value={form.title}
             />
           </Field>
           <Field label="Descrição">
             <Textarea
-              className="border-[#313244] bg-[#1e1e2e] text-[#cdd6f4]"
+              className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
               onChange={event => setForm(prev => ({ ...prev, body: event.target.value }))}
               rows={6}
               value={form.body}
@@ -454,7 +458,7 @@ function CreateTaskDialog({
           <div className="grid grid-cols-2 gap-3">
             <Field label="Status">
               <select
-                className="h-9 w-full rounded-md border border-[#313244] bg-[#1e1e2e] px-2 text-sm"
+                className="h-9 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2 text-sm"
                 onChange={event => setForm(prev => ({ ...prev, status: event.target.value as KanbanStatus }))}
                 value={form.status}
               >
@@ -467,7 +471,7 @@ function CreateTaskDialog({
             </Field>
             <Field label="Assignee">
               <select
-                className="h-9 w-full rounded-md border border-[#313244] bg-[#1e1e2e] px-2 text-sm"
+                className="h-9 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2 text-sm"
                 onChange={event => setForm(prev => ({ ...prev, assignee: event.target.value }))}
                 value={form.assignee}
               >
@@ -483,14 +487,14 @@ function CreateTaskDialog({
           <div className="grid grid-cols-[1fr_7rem] gap-3">
             <Field label="Tenant">
               <Input
-                className="border-[#313244] bg-[#1e1e2e] text-[#cdd6f4]"
+                className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
                 onChange={event => setForm(prev => ({ ...prev, tenant: event.target.value }))}
                 value={form.tenant}
               />
             </Field>
             <Field label="Prioridade">
               <Input
-                className="border-[#313244] bg-[#1e1e2e] text-[#cdd6f4]"
+                className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
                 onChange={event => setForm(prev => ({ ...prev, priority: event.target.value }))}
                 type="number"
                 value={form.priority}
@@ -499,7 +503,7 @@ function CreateTaskDialog({
           </div>
           <Field label="Workdir">
             <Input
-              className="border-[#313244] bg-[#1e1e2e] text-[#cdd6f4]"
+              className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
               onChange={event => setForm(prev => ({ ...prev, workspace_path: event.target.value }))}
               value={form.workspace_path}
             />
@@ -566,7 +570,7 @@ function TaskDetailDialog({
       title: activeTask.title,
       workspace_path: activeTask.workspace_path ?? ''
     })
-  }, [activeTask?.id, open])
+  }, [activeTask, open])
 
   const saveTask = async () => {
     if (!boardSlug || !activeTask) {
@@ -661,193 +665,217 @@ function TaskDetailDialog({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-w-5xl border-[#313244] bg-[#181825] text-[#cdd6f4]">
-        <DialogHeader>
-          <DialogTitle className="pr-8 text-[#f5e0dc]">{activeTask?.title ?? 'Card'}</DialogTitle>
+      <DialogContent className="flex h-[min(92vh,58rem)] max-h-[92vh] max-w-6xl flex-col overflow-hidden border-(--ui-stroke-secondary) bg-(--ui-chat-bubble-background) p-0 text-(--ui-text-primary)">
+        <DialogHeader className="shrink-0 border-b border-(--ui-stroke-secondary) px-5 py-4">
+          <DialogTitle className="pr-8 text-(--ui-text-primary)">{activeTask?.title ?? 'Card'}</DialogTitle>
           <DialogDescription>
             {activeTask ? `${activeTask.id} · ${activeTask.assignee || 'sem perfil'}` : 'Carregando detalhes…'}
           </DialogDescription>
         </DialogHeader>
         {activeTask ? (
-          <div className="grid max-h-[70vh] gap-4 overflow-y-auto pr-1 text-sm">
-            <section className="rounded-xl border border-[#313244] bg-[#1e1e2e] p-3">
-              <div className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#cba6f7]">Editar card</div>
-              <div className="grid gap-3">
-                <Field label="Título">
-                  <Input
-                    className="border-[#313244] bg-[#11111b] text-[#cdd6f4]"
-                    onChange={event => setEditForm(prev => ({ ...prev, title: event.target.value }))}
-                    value={editForm.title}
-                  />
-                </Field>
-                <Field label="Descrição">
-                  <Textarea
-                    className="border-[#313244] bg-[#11111b] text-[#cdd6f4]"
-                    onChange={event => setEditForm(prev => ({ ...prev, body: event.target.value }))}
-                    rows={5}
-                    value={editForm.body}
-                  />
-                </Field>
-                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                  <Field label="Status">
-                    <select
-                      className="h-9 w-full rounded-md border border-[#313244] bg-[#11111b] px-2 text-sm"
-                      onChange={event => setEditForm(prev => ({ ...prev, status: event.target.value as KanbanStatus }))}
-                      value={editForm.status}
-                    >
-                      {STATUSES.map(status => (
-                        <option key={status.value} value={status.value}>
-                          {status.label}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label="Assignee">
-                    <select
-                      className="h-9 w-full rounded-md border border-[#313244] bg-[#11111b] px-2 text-sm"
-                      onChange={event => setEditForm(prev => ({ ...prev, assignee: event.target.value }))}
-                      value={editForm.assignee}
-                    >
-                      <option value="">Sem perfil</option>
-                      {assignees.map(name => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label="Tenant">
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 text-sm">
+            <div className="grid gap-4">
+              <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
+                <div className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">
+                  Editar card
+                </div>
+                <div className="grid gap-3">
+                  <Field label="Título">
                     <Input
-                      className="border-[#313244] bg-[#11111b] text-[#cdd6f4]"
-                      onChange={event => setEditForm(prev => ({ ...prev, tenant: event.target.value }))}
-                      value={editForm.tenant}
+                      className="border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) text-(--ui-text-primary)"
+                      onChange={event => setEditForm(prev => ({ ...prev, title: event.target.value }))}
+                      value={editForm.title}
                     />
                   </Field>
-                  <Field label="Prioridade">
-                    <Input
-                      className="border-[#313244] bg-[#11111b] text-[#cdd6f4]"
-                      onChange={event => setEditForm(prev => ({ ...prev, priority: event.target.value }))}
-                      type="number"
-                      value={editForm.priority}
+                  <Field label="Descrição">
+                    <Textarea
+                      className="border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) text-(--ui-text-primary)"
+                      onChange={event => setEditForm(prev => ({ ...prev, body: event.target.value }))}
+                      rows={5}
+                      value={editForm.body}
                     />
                   </Field>
-                </div>
-                <Field label="Workdir">
-                  <Input
-                    className="border-[#313244] bg-[#11111b] text-[#cdd6f4]"
-                    onChange={event => setEditForm(prev => ({ ...prev, workspace_path: event.target.value }))}
-                    value={editForm.workspace_path}
-                  />
-                </Field>
-                <div className="flex justify-end">
-                  <Button disabled={savingTask} onClick={() => void saveTask()} type="button">
-                    {savingTask ? 'Salvando…' : 'Salvar alterações'}
-                  </Button>
-                </div>
-              </div>
-            </section>
-
-            <div className="grid grid-cols-2 gap-2 text-xs text-[#a6adc8] md:grid-cols-4">
-              <Meta label="Criado" value={formatTime(activeTask.created_at)} />
-              <Meta label="Status" value={activeTask.status} />
-              <Meta label="Prioridade" value={String(activeTask.priority)} />
-              <Meta label="Falhas" value={String(activeTask.consecutive_failures)} />
-              <Meta label="Tenant" value={activeTask.tenant || '—'} />
-              <Meta label="Workdir" value={activeTask.workspace_path || '—'} />
-              <Meta label="Branch" value={activeTask.branch_name || '—'} />
-              <Meta label="Run" value={activeTask.current_run_id ? String(activeTask.current_run_id) : '—'} />
-            </div>
-
-            {activeTask.result && (
-              <section className="rounded-xl border border-[#313244] bg-[#1e1e2e] p-3">
-                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#cba6f7]">Resultado</div>
-                <pre className="whitespace-pre-wrap break-words text-[#bac2de]">{activeTask.result}</pre>
-              </section>
-            )}
-
-            <AccordionBlock defaultOpen={failures.length > 0} title={`Falhas detectadas (${failures.length})`}>
-              <div className="space-y-2">
-                {failures.map((failure, index) => (
-                  <FailureCard failure={failure} key={`${failure.source}-${failure.run_id ?? failure.event_id ?? index}`} />
-                ))}
-                {!failures.length && <div className="text-xs text-[#6c7086]">Sem falhas registradas.</div>}
-              </div>
-            </AccordionBlock>
-
-            <AccordionBlock title={`Eventos completos (${detail?.events.length ?? 0})`}>
-              <div className="space-y-2">
-                {(detail?.events ?? []).map(event => {
-                  const payload = formatPayload(event.payload)
-
-                  return (
-                    <div className="rounded-lg border border-[#313244] bg-[#11111b] p-3 text-xs" key={event.id}>
-                      <div className="flex flex-wrap justify-between gap-2 text-[#cdd6f4]">
-                        <span>{event.kind}</span>
-                        <span className="text-[#6c7086]">{formatTime(event.created_at)}</span>
-                      </div>
-                      {payload && (
-                        <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-[#1e1e2e] p-2 text-[#a6adc8]">
-                          {payload}
-                        </pre>
-                      )}
-                    </div>
-                  )
-                })}
-                {!detail?.events?.length && <div className="text-xs text-[#6c7086]">Sem eventos ainda.</div>}
-              </div>
-            </AccordionBlock>
-
-            <AccordionBlock defaultOpen title={`Comentários (${detail?.comments.length ?? 0})`}>
-              <div className="space-y-3">
-                <div className="rounded-lg border border-[#313244] bg-[#11111b] p-3">
-                  <Textarea
-                    className="min-h-24 border-[#313244] bg-[#1e1e2e] text-[#cdd6f4]"
-                    onChange={event => setCommentBody(event.target.value)}
-                    placeholder="Adicionar comentário operacional…"
-                    value={commentBody}
-                  />
-                  <div className="mt-2 flex justify-end">
-                    <Button disabled={savingComment} onClick={() => void addComment()} size="sm" type="button">
-                      {savingComment ? 'Enviando…' : 'Comentar'}
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                    <Field label="Status">
+                      <select
+                        className="h-9 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) px-2 text-sm"
+                        onChange={event =>
+                          setEditForm(prev => ({ ...prev, status: event.target.value as KanbanStatus }))
+                        }
+                        value={editForm.status}
+                      >
+                        {STATUSES.map(status => (
+                          <option key={status.value} value={status.value}>
+                            {status.label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Assignee">
+                      <select
+                        className="h-9 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) px-2 text-sm"
+                        onChange={event => setEditForm(prev => ({ ...prev, assignee: event.target.value }))}
+                        value={editForm.assignee}
+                      >
+                        <option value="">Sem perfil</option>
+                        {assignees.map(name => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Tenant">
+                      <Input
+                        className="border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) text-(--ui-text-primary)"
+                        onChange={event => setEditForm(prev => ({ ...prev, tenant: event.target.value }))}
+                        value={editForm.tenant}
+                      />
+                    </Field>
+                    <Field label="Prioridade">
+                      <Input
+                        className="border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) text-(--ui-text-primary)"
+                        onChange={event => setEditForm(prev => ({ ...prev, priority: event.target.value }))}
+                        type="number"
+                        value={editForm.priority}
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Workdir">
+                    <Input
+                      className="border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) text-(--ui-text-primary)"
+                      onChange={event => setEditForm(prev => ({ ...prev, workspace_path: event.target.value }))}
+                      value={editForm.workspace_path}
+                    />
+                  </Field>
+                  <div className="flex justify-end">
+                    <Button disabled={savingTask} onClick={() => void saveTask()} type="button">
+                      {savingTask ? 'Salvando…' : 'Salvar alterações'}
                     </Button>
                   </div>
                 </div>
-                {(detail?.comments ?? []).map(comment => (
-                  <CommentCard
-                    comment={comment}
-                    editing={editingCommentId === comment.id}
-                    editingBody={editingCommentId === comment.id ? editingCommentBody : ''}
-                    expanded={expandedCommentId === comment.id}
-                    key={comment.id}
-                    onCancelEdit={() => {
-                      setEditingCommentBody('')
-                      setEditingCommentId(null)
-                    }}
-                    onEdit={() => {
-                      setEditingCommentBody(comment.body)
-                      setEditingCommentId(comment.id)
-                    }}
-                    onEditingBodyChange={setEditingCommentBody}
-                    onSave={() => void saveCommentEdit(comment.id)}
-                    onToggleExpanded={() => setExpandedCommentId(current => (current === comment.id ? null : comment.id))}
-                    saving={savingCommentEdit}
-                  />
-                ))}
-                {!detail?.comments?.length && <div className="text-xs text-[#6c7086]">Sem comentários ainda.</div>}
-              </div>
-            </AccordionBlock>
+              </section>
 
-            <AccordionBlock title={`Runs (${detail?.runs.length ?? 0})`}>
-              <div className="space-y-2">
-                {(detail?.runs ?? []).map((run, index) => (
-                  <RunCard key={String(run.id ?? index)} run={run} />
-                ))}
-                {!detail?.runs?.length && <div className="text-xs text-[#6c7086]">Sem runs ainda.</div>}
+              <div className="grid grid-cols-2 gap-2 text-xs text-(--ui-text-tertiary) md:grid-cols-4">
+                <Meta label="Criado" value={formatTime(activeTask.created_at)} />
+                <Meta label="Status" value={activeTask.status} />
+                <Meta label="Prioridade" value={String(activeTask.priority)} />
+                <Meta label="Falhas" value={String(activeTask.consecutive_failures)} />
+                <Meta label="Tenant" value={activeTask.tenant || '—'} />
+                <Meta label="Workdir" value={activeTask.workspace_path || '—'} />
+                <Meta label="Branch" value={activeTask.branch_name || '—'} />
+                <Meta label="Run" value={activeTask.current_run_id ? String(activeTask.current_run_id) : '—'} />
               </div>
-            </AccordionBlock>
+
+              {activeTask.result && (
+                <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">
+                    Resultado
+                  </div>
+                  <pre className="whitespace-pre-wrap break-words text-(--ui-text-secondary)">{activeTask.result}</pre>
+                </section>
+              )}
+
+              <AccordionBlock defaultOpen={failures.length > 0} title={`Falhas detectadas (${failures.length})`}>
+                <div className="space-y-2">
+                  {failures.map((failure, index) => (
+                    <FailureCard
+                      failure={failure}
+                      key={`${failure.source}-${failure.run_id ?? failure.event_id ?? index}`}
+                    />
+                  ))}
+                  {!failures.length && (
+                    <div className="text-xs text-(--ui-text-quaternary)">Sem falhas registradas.</div>
+                  )}
+                </div>
+              </AccordionBlock>
+
+              <AccordionBlock title={`Eventos completos (${detail?.events.length ?? 0})`}>
+                <div className="space-y-2">
+                  {(detail?.events ?? []).map(event => {
+                    const payload = formatPayload(event.payload)
+
+                    return (
+                      <div
+                        className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3 text-xs"
+                        key={event.id}
+                      >
+                        <div className="flex flex-wrap justify-between gap-2 text-(--ui-text-primary)">
+                          <span>{event.kind}</span>
+                          <span className="text-(--ui-text-quaternary)">{formatTime(event.created_at)}</span>
+                        </div>
+                        {payload && (
+                          <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-(--ui-bg-secondary) p-2 text-(--ui-text-tertiary)">
+                            {payload}
+                          </pre>
+                        )}
+                      </div>
+                    )
+                  })}
+                  {!detail?.events?.length && (
+                    <div className="text-xs text-(--ui-text-quaternary)">Sem eventos ainda.</div>
+                  )}
+                </div>
+              </AccordionBlock>
+
+              <AccordionBlock defaultOpen title={`Comentários (${detail?.comments.length ?? 0})`}>
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3">
+                    <Textarea
+                      className="min-h-24 border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
+                      onChange={event => setCommentBody(event.target.value)}
+                      placeholder="Adicionar comentário operacional…"
+                      value={commentBody}
+                    />
+                    <div className="mt-2 flex justify-end">
+                      <Button disabled={savingComment} onClick={() => void addComment()} size="sm" type="button">
+                        {savingComment ? 'Enviando…' : 'Comentar'}
+                      </Button>
+                    </div>
+                  </div>
+                  {(detail?.comments ?? []).map(comment => (
+                    <CommentCard
+                      comment={comment}
+                      editing={editingCommentId === comment.id}
+                      editingBody={editingCommentId === comment.id ? editingCommentBody : ''}
+                      expanded={expandedCommentId === comment.id}
+                      key={comment.id}
+                      onCancelEdit={() => {
+                        setEditingCommentBody('')
+                        setEditingCommentId(null)
+                      }}
+                      onEdit={() => {
+                        setEditingCommentBody(comment.body)
+                        setEditingCommentId(comment.id)
+                      }}
+                      onEditingBodyChange={setEditingCommentBody}
+                      onSave={() => void saveCommentEdit(comment.id)}
+                      onToggleExpanded={() =>
+                        setExpandedCommentId(current => (current === comment.id ? null : comment.id))
+                      }
+                      saving={savingCommentEdit}
+                    />
+                  ))}
+                  {!detail?.comments?.length && (
+                    <div className="text-xs text-(--ui-text-quaternary)">Sem comentários ainda.</div>
+                  )}
+                </div>
+              </AccordionBlock>
+
+              <AccordionBlock title={`Runs (${detail?.runs.length ?? 0})`}>
+                <div className="space-y-2">
+                  {(detail?.runs ?? []).map((run, index) => (
+                    <RunCard key={String(run.id ?? index)} run={run} />
+                  ))}
+                  {!detail?.runs?.length && <div className="text-xs text-(--ui-text-quaternary)">Sem runs ainda.</div>}
+                </div>
+              </AccordionBlock>
+            </div>
           </div>
         ) : (
-          <div className="rounded-lg border border-[#313244] bg-[#1e1e2e] p-4 text-sm text-[#a6adc8]">Carregando detalhes…</div>
+          <div className="m-5 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-4 text-sm text-(--ui-text-tertiary)">
+            Carregando detalhes…
+          </div>
         )}
       </DialogContent>
     </Dialog>
@@ -874,9 +902,9 @@ function TaskCard({
   return (
     <div
       className={cn(
-        'rounded-xl border border-[#313244] bg-[#1e1e2e] p-3 text-left shadow-sm transition hover:border-[#cba6f7]/60 hover:bg-[#24273a]',
-        active && 'border-[#cba6f7] shadow-[0_0_0_1px_rgba(203,166,247,.35)]',
-        dragging && 'opacity-55 ring-1 ring-[#cba6f7]/40'
+        'rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3 text-left shadow-sm transition hover:border-(--ui-accent) hover:bg-(--ui-control-hover-background)',
+        active && 'border-(--ui-accent) ring-1 ring-(--ui-accent)',
+        dragging && 'opacity-55 ring-1 ring-(--ui-accent)'
       )}
       data-kanban-card="true"
       draggable
@@ -901,14 +929,20 @@ function TaskCard({
       role="button"
       tabIndex={0}
     >
-      <div className="line-clamp-2 text-sm font-medium text-[#cdd6f4]">{task.title}</div>
-      {task.body && <div className="mt-2 line-clamp-3 text-xs leading-relaxed text-[#a6adc8]">{task.body}</div>}
-      <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[0.68rem] text-[#a6adc8]">
-        <span className="rounded bg-[#313244] px-1.5 py-0.5">{task.assignee || 'unassigned'}</span>
-        {task.tenant && <span className="rounded bg-[#313244] px-1.5 py-0.5">{task.tenant}</span>}
-        {task.consecutive_failures > 0 && <span className="rounded bg-[#ed8796]/20 px-1.5 py-0.5 text-[#ed8796]">⚠ {task.consecutive_failures}</span>}
+      <div className="line-clamp-2 text-sm font-medium text-(--ui-text-primary)">{task.title}</div>
+      {task.body && (
+        <div className="mt-2 line-clamp-3 text-xs leading-relaxed text-(--ui-text-tertiary)">{task.body}</div>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[0.68rem] text-(--ui-text-tertiary)">
+        <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5">{task.assignee || 'unassigned'}</span>
+        {task.tenant && <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5">{task.tenant}</span>}
+        {task.consecutive_failures > 0 && (
+          <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5 text-(--ui-red)">
+            ⚠ {task.consecutive_failures}
+          </span>
+        )}
         <button
-          className="ml-auto rounded border border-[#45475a] px-1.5 py-0.5 text-[#cba6f7] transition hover:bg-[#313244]"
+          className="ml-auto rounded border border-(--ui-stroke-primary) px-1.5 py-0.5 text-(--ui-accent) transition hover:bg-(--ui-bg-primary)"
           onClick={event => {
             event.stopPropagation()
             onOpenDetail()
@@ -938,16 +972,16 @@ function AccordionBlock({
   }, [defaultOpen, title])
 
   return (
-    <section className="overflow-hidden rounded-xl border border-[#313244] bg-[#1e1e2e]">
+    <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)">
       <button
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.16em] text-[#cba6f7] transition hover:bg-[#24273a]"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent) transition hover:bg-(--ui-control-hover-background)"
         onClick={() => setOpen(current => !current)}
         type="button"
       >
         <span>{title}</span>
-        <span className="text-[#a6adc8]">{open ? '▾' : '▸'}</span>
+        <span className="text-(--ui-text-tertiary)">{open ? '▾' : '▸'}</span>
       </button>
-      {open && <div className="border-t border-[#313244] p-3">{children}</div>}
+      {open && <div className="border-t border-(--ui-stroke-secondary) p-3">{children}</div>}
     </section>
   )
 }
@@ -957,21 +991,24 @@ function FailureCard({ failure }: { failure: KanbanFailure }) {
   const error = failure.error || failure.summary || failure.outcome || failure.kind || 'Falha sem mensagem'
 
   return (
-    <div className="rounded-lg border border-[#ed8796]/35 bg-[#11111b] p-3 text-xs">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[#f38ba8]">
+    <div className="rounded-lg border border-(--ui-red) bg-(--ui-bg-chrome) p-3 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-(--ui-red)">
         <span>
           {failure.source}
           {failure.run_id ? ` · run ${failure.run_id}` : ''}
           {failure.event_id ? ` · evento ${failure.event_id}` : ''}
         </span>
-        <span className="text-[#6c7086]">
-          {formatTime(failure.started_at)}{failure.ended_at ? ` → ${formatTime(failure.ended_at)}` : ''}
+        <span className="text-(--ui-text-quaternary)">
+          {formatTime(failure.started_at)}
+          {failure.ended_at ? ` → ${formatTime(failure.ended_at)}` : ''}
         </span>
       </div>
-      {failure.profile && <div className="mt-1 text-[#a6adc8]">Perfil: {failure.profile}</div>}
-      <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-[#1e1e2e] p-2 text-[#f38ba8]">{error}</pre>
+      {failure.profile && <div className="mt-1 text-(--ui-text-tertiary)">Perfil: {failure.profile}</div>}
+      <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-(--ui-bg-secondary) p-2 text-(--ui-red)">
+        {error}
+      </pre>
       {payload && payload !== error && (
-        <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-[#1e1e2e] p-2 text-[#a6adc8]">
+        <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-(--ui-bg-secondary) p-2 text-(--ui-text-tertiary)">
           {payload}
         </pre>
       )}
@@ -985,18 +1022,23 @@ function RunCard({ run }: { run: Record<string, unknown> }) {
   const endedAt = typeof run.ended_at === 'number' ? run.ended_at : null
 
   return (
-    <div className="rounded-lg border border-[#313244] bg-[#11111b] p-3 text-xs">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[#cdd6f4]">
+    <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-(--ui-text-primary)">
         <span>
           Run {String(run.id ?? '—')} · {status}
         </span>
-        <span className="text-[#6c7086]">
-          {formatTime(startedAt)}{endedAt ? ` → ${formatTime(endedAt)}` : ''}
+        <span className="text-(--ui-text-quaternary)">
+          {formatTime(startedAt)}
+          {endedAt ? ` → ${formatTime(endedAt)}` : ''}
         </span>
       </div>
-      {run.summary ? <pre className="mt-2 whitespace-pre-wrap break-words text-[#bac2de]">{String(run.summary)}</pre> : null}
-      {run.error ? <pre className="mt-2 whitespace-pre-wrap break-words text-[#f38ba8]">{String(run.error)}</pre> : null}
-      <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-[#1e1e2e] p-2 text-[#a6adc8]">
+      {run.summary ? (
+        <pre className="mt-2 whitespace-pre-wrap break-words text-(--ui-text-secondary)">{String(run.summary)}</pre>
+      ) : null}
+      {run.error ? (
+        <pre className="mt-2 whitespace-pre-wrap break-words text-(--ui-red)">{String(run.error)}</pre>
+      ) : null}
+      <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-(--ui-bg-secondary) p-2 text-(--ui-text-tertiary)">
         {JSON.stringify(run, null, 2)}
       </pre>
     </div>
@@ -1027,15 +1069,15 @@ function CommentCard({
   saving: boolean
 }) {
   return (
-    <div className="rounded-lg border border-[#313244] bg-[#11111b] p-3 text-xs">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[#cdd6f4]">
+    <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-(--ui-text-primary)">
         <span>{comment.author}</span>
-        <span className="text-[#6c7086]">{formatTime(comment.created_at)}</span>
+        <span className="text-(--ui-text-quaternary)">{formatTime(comment.created_at)}</span>
       </div>
       {editing ? (
         <div className="mt-3 space-y-2">
           <Textarea
-            className="min-h-32 border-[#313244] bg-[#1e1e2e] text-[#cdd6f4]"
+            className="min-h-32 border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
             onChange={event => onEditingBodyChange(event.target.value)}
             value={editingBody}
           />
@@ -1050,7 +1092,12 @@ function CommentCard({
         </div>
       ) : (
         <>
-          <pre className={cn('mt-2 whitespace-pre-wrap break-words text-[#bac2de]', !expanded && 'max-h-36 overflow-hidden')}>
+          <pre
+            className={cn(
+              'mt-2 whitespace-pre-wrap break-words text-(--ui-text-secondary)',
+              !expanded && 'max-h-36 overflow-hidden'
+            )}
+          >
             {comment.body}
           </pre>
           <div className="mt-2 flex justify-end gap-2">
@@ -1069,7 +1116,7 @@ function CommentCard({
 
 function Field({ children, label }: { children: React.ReactNode; label: string }) {
   return (
-    <label className="grid gap-1.5 text-xs font-medium uppercase tracking-[0.12em] text-[#a6adc8]">
+    <label className="grid gap-1.5 text-xs font-medium uppercase tracking-[0.12em] text-(--ui-text-tertiary)">
       {label}
       {children}
     </label>
@@ -1078,9 +1125,9 @@ function Field({ children, label }: { children: React.ReactNode; label: string }
 
 function Meta({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-[#313244] bg-[#1e1e2e] p-2">
-      <div className="text-[0.65rem] uppercase tracking-[0.14em] text-[#6c7086]">{label}</div>
-      <div className="mt-1 truncate text-[#cdd6f4]" title={value}>
+    <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-2">
+      <div className="text-[0.65rem] uppercase tracking-[0.14em] text-(--ui-text-quaternary)">{label}</div>
+      <div className="mt-1 truncate text-(--ui-text-primary)" title={value}>
         {value}
       </div>
     </div>

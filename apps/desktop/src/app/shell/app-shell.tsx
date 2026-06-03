@@ -108,7 +108,9 @@ export function AppShell({
 
   return (
     <SidebarProvider
-      className="h-screen min-h-0 flex-col bg-background"
+      className="relative isolate h-screen min-h-0 flex-col overflow-hidden bg-(--shell-background)"
+      data-hermes-ambient-shell
+      data-hermes-shell-root
       onOpenChange={setSidebarOpen}
       open={sidebarOpen}
       style={
