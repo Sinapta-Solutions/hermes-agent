@@ -1,3 +1,58 @@
+
+export interface Workspace {
+  board_id?: null | string
+  created_at: string
+  description?: null | string
+  id: string
+  name: string
+  repo_path?: null | string
+  updated_at: string
+  vault_path?: null | string
+}
+
+export interface WorkspacesResponse {
+  object: 'list'
+  workspaces: Workspace[]
+}
+
+export interface WorkspaceMutationResponse {
+  object: 'hermes.workspace'
+  workspace: Workspace
+}
+
+export interface WorkspacePayload {
+  board_id?: null | string
+  description?: null | string
+  name: string
+  repo_path?: null | string
+  vault_path?: null | string
+}
+
+export interface WorkspaceStatus {
+  event_count: number
+  object: 'hermes.workspace.status'
+  profile_count: number
+  repo_exists: boolean
+  task_counts: Record<string, number>
+  vault_exists: boolean
+  workspace_id: string
+}
+
+export interface WorkspaceEvent {
+  created_at: string
+  id: string
+  message: string
+  metadata?: null | Record<string, unknown>
+  type: string
+  workspace_id: string
+}
+
+export interface WorkspaceEventsResponse {
+  events: WorkspaceEvent[]
+  limit: number
+  object: 'list'
+}
+
 export interface ConfigFieldSchema {
   category?: string
   description?: string

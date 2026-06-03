@@ -718,6 +718,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._workspaces_db: Optional[sqlite3.Connection] = None  # Lazy-init native M.i.A workspace store
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -1232,6 +1233,282 @@ class APIServerAdapter(BasePlatformAdapter):
             "platform": "api_server",
             "data": data,
         })
+
+    # ------------------------------------------------------------------
+    # /api/workspaces — native M.i.A workspace/project store
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _workspace_db_path() -> Path:
+        try:
+            from hermes_cli.config import get_hermes_home
+            return get_hermes_home() / "workspaces.db"
+        except Exception:
+            return Path.home() / ".hermes" / "workspaces.db"
+
+    def _ensure_workspaces_db(self) -> sqlite3.Connection:
+        if self._workspaces_db is not None:
+            return self._workspaces_db
+
+        db_path = self._workspace_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            from hermes_state import apply_wal_with_fallback
+            apply_wal_with_fallback(conn, db_label="workspaces.db")
+        except Exception:
+            try:
+                conn.execute("PRAGMA journal_mode = WAL")
+            except Exception:
+                pass
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS workspaces (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              repo_path TEXT,
+              vault_path TEXT,
+              board_id TEXT,
+              description TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_profiles (
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              profile_name TEXT NOT NULL,
+              role TEXT,
+              PRIMARY KEY (workspace_id, profile_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_events (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              type TEXT NOT NULL,
+              message TEXT NOT NULL,
+              metadata_json TEXT,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_tasks (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              title TEXT NOT NULL,
+              status TEXT NOT NULL,
+              source TEXT,
+              assigned_profile TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_workspace_events_workspace_created
+              ON workspace_events(workspace_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_workspace_tasks_workspace_status
+              ON workspace_tasks(workspace_id, status);
+            """
+        )
+        conn.commit()
+        self._workspaces_db = conn
+        return conn
+
+    @staticmethod
+    def _workspace_now() -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _workspace_text(value: Any, *, max_len: int = 4096) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return text[:max_len]
+
+    @staticmethod
+    def _workspace_response(row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "repo_path": row["repo_path"],
+            "vault_path": row["vault_path"],
+            "board_id": row["board_id"],
+            "description": row["description"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _get_workspace_or_404(self, workspace_id: str) -> tuple[Optional[sqlite3.Row], Optional["web.Response"]]:
+        conn = self._ensure_workspaces_db()
+        row = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+        if row is None:
+            return None, web.json_response(_openai_error(f"Workspace not found: {workspace_id}", code="workspace_not_found"), status=404)
+        return row, None
+
+    def _record_workspace_event(
+        self,
+        conn: sqlite3.Connection,
+        workspace_id: str,
+        event_type: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO workspace_events (id, workspace_id, type, message, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"evt_{uuid.uuid4().hex}",
+                workspace_id,
+                event_type,
+                message,
+                json.dumps(metadata or {}, ensure_ascii=False) if metadata else None,
+                self._workspace_now(),
+            ),
+        )
+
+    async def _handle_list_workspaces(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        conn = self._ensure_workspaces_db()
+        rows = conn.execute("SELECT * FROM workspaces ORDER BY updated_at DESC, name COLLATE NOCASE ASC").fetchall()
+        return web.json_response({"object": "list", "workspaces": [self._workspace_response(row) for row in rows]})
+
+    async def _handle_create_workspace(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        name = self._workspace_text(body.get("name"), max_len=160)
+        if not name:
+            return web.json_response(_openai_error("Workspace name is required", code="invalid_workspace_name"), status=400)
+        raw_id = self._workspace_text(body.get("id"), max_len=80)
+        workspace_id = raw_id or f"ws_{uuid.uuid4().hex[:16]}"
+        if not re.match(r"^[A-Za-z0-9_.:-]{3,80}$", workspace_id):
+            return web.json_response(_openai_error("Invalid workspace ID", code="invalid_workspace_id"), status=400)
+        now = self._workspace_now()
+        conn = self._ensure_workspaces_db()
+        try:
+            conn.execute(
+                """
+                INSERT INTO workspaces (id, name, repo_path, vault_path, board_id, description, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    name,
+                    self._workspace_text(body.get("repo_path"), max_len=2048),
+                    self._workspace_text(body.get("vault_path"), max_len=2048),
+                    self._workspace_text(body.get("board_id"), max_len=160),
+                    self._workspace_text(body.get("description"), max_len=4096),
+                    now,
+                    now,
+                ),
+            )
+            self._record_workspace_event(conn, workspace_id, "workspace.created", f"Workspace created: {name}")
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return web.json_response(_openai_error(f"Workspace already exists: {workspace_id}", code="workspace_exists"), status=409)
+        row = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+        return web.json_response({"object": "hermes.workspace", "workspace": self._workspace_response(row)}, status=201)
+
+    async def _handle_patch_workspace(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        workspace_id = request.match_info["workspace_id"]
+        _, err = self._get_workspace_or_404(workspace_id)
+        if err:
+            return err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        allowed = {"name", "repo_path", "vault_path", "board_id", "description"}
+        unknown = sorted(set(body) - allowed)
+        if unknown:
+            return web.json_response(_openai_error(f"Unsupported workspace fields: {', '.join(unknown)}", code="unsupported_workspace_field"), status=400)
+        if "name" in body and not self._workspace_text(body.get("name"), max_len=160):
+            return web.json_response(_openai_error("Workspace name is required", code="invalid_workspace_name"), status=400)
+        fields = []
+        values: List[Any] = []
+        for key in ("name", "repo_path", "vault_path", "board_id", "description"):
+            if key in body:
+                fields.append(f"{key} = ?")
+                max_len = 160 if key in {"name", "board_id"} else 2048 if key.endswith("_path") else 4096
+                values.append(self._workspace_text(body.get(key), max_len=max_len))
+        if not fields:
+            row, _ = self._get_workspace_or_404(workspace_id)
+            return web.json_response({"object": "hermes.workspace", "workspace": self._workspace_response(row)})
+        fields.append("updated_at = ?")
+        values.append(self._workspace_now())
+        values.append(workspace_id)
+        conn = self._ensure_workspaces_db()
+        conn.execute(f"UPDATE workspaces SET {', '.join(fields)} WHERE id = ?", values)
+        self._record_workspace_event(conn, workspace_id, "workspace.updated", "Workspace metadata updated", {"fields": sorted(body.keys())})
+        conn.commit()
+        row = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+        return web.json_response({"object": "hermes.workspace", "workspace": self._workspace_response(row)})
+
+    async def _handle_workspace_status(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        workspace_id = request.match_info["workspace_id"]
+        row, err = self._get_workspace_or_404(workspace_id)
+        if err:
+            return err
+        conn = self._ensure_workspaces_db()
+        profile_count = conn.execute("SELECT COUNT(*) AS count FROM workspace_profiles WHERE workspace_id = ?", (workspace_id,)).fetchone()["count"]
+        event_count = conn.execute("SELECT COUNT(*) AS count FROM workspace_events WHERE workspace_id = ?", (workspace_id,)).fetchone()["count"]
+        task_rows = conn.execute("SELECT status, COUNT(*) AS count FROM workspace_tasks WHERE workspace_id = ? GROUP BY status", (workspace_id,)).fetchall()
+        tasks = {task_row["status"]: task_row["count"] for task_row in task_rows}
+        repo_path = row["repo_path"]
+        vault_path = row["vault_path"]
+        return web.json_response({
+            "object": "hermes.workspace.status",
+            "workspace_id": workspace_id,
+            "profile_count": profile_count,
+            "event_count": event_count,
+            "task_counts": tasks,
+            "repo_exists": bool(repo_path and Path(repo_path).exists()),
+            "vault_exists": bool(vault_path and Path(vault_path).exists()),
+        })
+
+    async def _handle_workspace_events(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        workspace_id = request.match_info["workspace_id"]
+        _, err = self._get_workspace_or_404(workspace_id)
+        if err:
+            return err
+        limit = self._parse_nonnegative_int(request.query.get("limit"), default=25, maximum=100)
+        conn = self._ensure_workspaces_db()
+        rows = conn.execute(
+            "SELECT * FROM workspace_events WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?",
+            (workspace_id, limit),
+        ).fetchall()
+        events = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+            except Exception:
+                metadata = None
+            events.append({
+                "id": row["id"],
+                "workspace_id": row["workspace_id"],
+                "type": row["type"],
+                "message": row["message"],
+                "metadata": metadata,
+                "created_at": row["created_at"],
+            })
+        return web.json_response({"object": "list", "events": events, "limit": limit})
 
     # ------------------------------------------------------------------
     # /api/sessions — thin client/session resource API
@@ -4096,6 +4373,12 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_get("/v1/skills", self._handle_skills)
             self._app.router.add_get("/v1/toolsets", self._handle_toolsets)
+            # Native M.i.A workspace/project control surface
+            self._app.router.add_get("/api/workspaces", self._handle_list_workspaces)
+            self._app.router.add_post("/api/workspaces", self._handle_create_workspace)
+            self._app.router.add_patch("/api/workspaces/{workspace_id}", self._handle_patch_workspace)
+            self._app.router.add_get("/api/workspaces/{workspace_id}/status", self._handle_workspace_status)
+            self._app.router.add_get("/api/workspaces/{workspace_id}/events", self._handle_workspace_events)
             # Session/client control surface (thin wrappers over SessionDB + _run_agent)
             self._app.router.add_get("/api/sessions", self._handle_list_sessions)
             self._app.router.add_post("/api/sessions", self._handle_create_session)

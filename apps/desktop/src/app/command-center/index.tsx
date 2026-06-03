@@ -37,7 +37,7 @@ import { OverlayActionButton, OverlayCard, overlayCardClass, OverlayIconButton }
 import { OverlaySearchInput } from '../overlays/overlay-search-input'
 import { OverlayMain, OverlayNavItem, OverlaySidebar, OverlaySplitLayout } from '../overlays/overlay-split-layout'
 import { OverlayView } from '../overlays/overlay-view'
-import { ARTIFACTS_ROUTE, MESSAGING_ROUTE, NEW_CHAT_ROUTE, SETTINGS_ROUTE, SKILLS_ROUTE } from '../routes'
+import { ARTIFACTS_ROUTE, MESSAGING_ROUTE, NEW_CHAT_ROUTE, SETTINGS_ROUTE, SKILLS_ROUTE, WORKSPACES_ROUTE } from '../routes'
 
 export type CommandCenterSection = 'sessions' | 'system' | 'usage'
 
@@ -82,8 +82,9 @@ interface SectionSearchEntry {
 
 const NAVIGATION_SEARCH_ENTRIES: readonly NavigationSearchEntry[] = [
   { id: 'nav-new-chat', route: NEW_CHAT_ROUTE, title: 'New session', detail: 'Start a fresh session' },
-  { id: 'nav-settings', route: SETTINGS_ROUTE, title: 'Settings', detail: 'Configure Hermes desktop' },
+  { id: 'nav-settings', route: SETTINGS_ROUTE, title: 'Settings', detail: 'Configure M.i.A Hermes desktop' },
   { id: 'nav-skills', route: SKILLS_ROUTE, title: 'Skills & Tools', detail: 'Enable skills, toolsets, and providers' },
+  { id: 'nav-workspaces', route: WORKSPACES_ROUTE, title: 'Workspaces', detail: 'Manage projects for the native M.i.A orchestrator' },
   {
     id: 'nav-messaging',
     route: MESSAGING_ROUTE,
@@ -647,7 +648,7 @@ export function CommandCenterView({
                           </span>
                         </div>
                         <div className="mt-1 text-xs text-muted-foreground">
-                          Hermes {status.version} · Active sessions {status.active_sessions}
+                          M.i.A Hermes {status.version} · Active sessions {status.active_sessions}
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
@@ -655,7 +656,7 @@ export function CommandCenterView({
                           Restart messaging
                         </OverlayActionButton>
                         <OverlayActionButton className="h-7 px-2.5" onClick={() => void runSystemAction('update')}>
-                          Update Hermes
+                          Update M.i.A Hermes
                         </OverlayActionButton>
                       </div>
                     </div>

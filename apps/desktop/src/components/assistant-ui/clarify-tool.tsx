@@ -173,7 +173,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
         </span>
         <div className="grid flex-1 gap-0.5">
           <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground/85">
-            Hermes is asking
+            M.i.A is asking
           </span>
           <span className="whitespace-pre-wrap leading-snug text-foreground">
             {question || <em className="text-muted-foreground/70">Loading question…</em>}

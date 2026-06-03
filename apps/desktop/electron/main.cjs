@@ -3707,7 +3707,7 @@ ipcMain.handle('hermes:api', async (_event, request) => {
 ipcMain.handle('hermes:notify', (_event, payload) => {
   if (!Notification.isSupported()) return false
   new Notification({
-    title: payload?.title || 'Hermes',
+    title: payload?.title || 'M.i.A',
     body: payload?.body || '',
     silent: Boolean(payload?.silent)
   }).show()

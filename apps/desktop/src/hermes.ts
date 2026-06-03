@@ -37,7 +37,14 @@ import type {
   SkillInfo,
   StatusResponse,
   ToolsetConfig,
-  ToolsetInfo
+  ToolsetInfo,
+  Workspace,
+  WorkspaceEvent,
+  WorkspaceEventsResponse,
+  WorkspaceMutationResponse,
+  WorkspacePayload,
+  WorkspacesResponse,
+  WorkspaceStatus
 } from '@/types/hermes'
 
 const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
@@ -96,8 +103,46 @@ export type {
   SkillInfo,
   StatusResponse,
   ToolsetConfig,
-  ToolsetInfo
+  ToolsetInfo,
+  Workspace,
+  WorkspaceEvent,
+  WorkspaceEventsResponse,
+  WorkspaceMutationResponse,
+  WorkspacePayload,
+  WorkspacesResponse,
+  WorkspaceStatus
 } from '@/types/hermes'
+
+
+export function getWorkspaces(): Promise<Workspace[]> {
+  return window.hermesDesktop.api<WorkspacesResponse>({ path: '/api/workspaces' }).then(result => result.workspaces)
+}
+
+export function createWorkspace(body: WorkspacePayload): Promise<Workspace> {
+  return window.hermesDesktop
+    .api<WorkspaceMutationResponse>({ path: '/api/workspaces', method: 'POST', body })
+    .then(result => result.workspace)
+}
+
+export function updateWorkspace(id: string, body: Partial<WorkspacePayload>): Promise<Workspace> {
+  return window.hermesDesktop
+    .api<WorkspaceMutationResponse>({
+      path: `/api/workspaces/${encodeURIComponent(id)}`,
+      method: 'PATCH',
+      body
+    })
+    .then(result => result.workspace)
+}
+
+export function getWorkspaceStatus(id: string): Promise<WorkspaceStatus> {
+  return window.hermesDesktop.api<WorkspaceStatus>({ path: `/api/workspaces/${encodeURIComponent(id)}/status` })
+}
+
+export function getWorkspaceEvents(id: string, limit = 25): Promise<WorkspaceEventsResponse> {
+  return window.hermesDesktop.api<WorkspaceEventsResponse>({
+    path: `/api/workspaces/${encodeURIComponent(id)}/events?limit=${limit}`
+  })
+}
 
 export class HermesGateway extends JsonRpcGatewayClient {
   constructor() {

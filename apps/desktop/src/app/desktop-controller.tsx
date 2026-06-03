@@ -94,6 +94,7 @@ const MessagingView = lazy(async () => ({ default: (await import('./messaging'))
 const ProfilesView = lazy(async () => ({ default: (await import('./profiles')).ProfilesView }))
 const SettingsView = lazy(async () => ({ default: (await import('./settings')).SettingsView }))
 const SkillsView = lazy(async () => ({ default: (await import('./skills')).SkillsView }))
+const WorkspacesView = lazy(async () => ({ default: (await import('./workspaces')).WorkspacesView }))
 
 export function DesktopController() {
   const queryClient = useQueryClient()
@@ -666,6 +667,17 @@ export function DesktopController() {
               </Suspense>
             }
             path="skills"
+          />
+          <Route
+            element={
+              <Suspense fallback={null}>
+                <WorkspacesView
+                  onNewSessionInWorkspace={startSessionInWorkspace}
+                  setStatusbarItemGroup={setStatusbarItemGroup}
+                />
+              </Suspense>
+            }
+            path="workspaces"
           />
           <Route
             element={
