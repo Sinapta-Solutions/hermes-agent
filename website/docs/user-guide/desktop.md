@@ -92,8 +92,9 @@ To launch via the CLI, simply run `hermes desktop`. By default it installs works
 | Flag                 | Description                                                                               |
 | -------------------- | ----------------------------------------------------------------------------------------- |
 | `--skip-build`       | Skip npm install/package and launch the existing unpacked app from `apps/desktop/release` |
+| `--force-build`      | Force a full rebuild even if the content stamp matches                                    |
+| `--build-only`       | Build the desktop app but do not launch it (used by `hermes update`)                      |
 | `--source`           | Launch via `electron .` against `apps/desktop/dist` instead of the packaged app           |
-| `--build-only`       | Build the desktop app but do not launch it (used by the installer's `--update` flow)      |
 | `--cwd PATH`         | Initial project directory for desktop chat sessions (sets `HERMES_DESKTOP_CWD`)           |
 | `--hermes-root PATH` | Override the Hermes source root the app uses (sets `HERMES_DESKTOP_HERMES_ROOT`)          |
 | `--ignore-existing`  | Force the app to ignore any `hermes` CLI already on `PATH` during backend resolution      |
@@ -102,6 +103,58 @@ To launch via the CLI, simply run `hermes desktop`. By default it installs works
 ## How it works
 
 The packaged app ships only the Electron shell. On first launch it installs the Hermes Agent runtime into `HERMES_HOME` (`~/.hermes`, or `%LOCALAPPDATA%\hermes` on Windows) — **the same layout a CLI install uses**, which is why the two are interchangeable. The React renderer talks to a `hermes dashboard --tui` backend over the standard gateway APIs and reuses the agent rather than reimplementing it. Install, backend-resolution, and self-update logic live in the Electron main process.
+
+## Connecting to a remote backend
+
+By default the app starts and manages its own **local** backend. You can instead point it at a Hermes backend running on another machine — a VPS, a home server, or a Mini behind Tailscale — under **Settings → Gateway → Remote gateway**. It asks for two things:
+
+- **Remote URL** — the backend's dashboard URL, e.g. `http://<host>:9119`
+- **Session token** — the backend's dashboard session token
+
+The session token is the part that trips people up. **Hermes does not print it for you to copy** — by default the backend mints a fresh random token on every boot and injects it straight into the served HTML, so there is nothing in `config.yaml`, in `/gateway`, or in the logs to grab. For a remote connection you pin the token yourself on the backend, then paste that same value into the app.
+
+### On the backend (the remote machine)
+
+```bash
+# 1. Mint a stable token and store it in ~/.hermes/.env (secrets file, 0600).
+#    Without HERMES_DASHBOARD_SESSION_TOKEN the token is random per boot and
+#    uncopyable; setting it pins the value the desktop app will use.
+TOKEN=$(openssl rand -base64 32)
+echo "HERMES_DASHBOARD_SESSION_TOKEN=$TOKEN" >> ~/.hermes/.env
+chmod 600 ~/.hermes/.env
+echo "$TOKEN"   # copy this value into the desktop app
+
+# 2. Run the dashboard bound to a reachable address.
+#    --insecure is required for any non-loopback bind and keeps the legacy
+#    session-token auth path (a non-loopback bind WITHOUT --insecure engages
+#    the OAuth gate, which ignores the session token).
+hermes dashboard --no-open --insecure --host 0.0.0.0 --port 9119
+```
+
+Running the dashboard as a systemd service? Give the unit `EnvironmentFile=%h/.hermes/.env` so the token is in the environment at boot.
+
+:::warning
+`--insecure` exposes a port that reads/writes your `.env` (API keys, secrets) and can run agent commands. Never expose it to the open internet — put it behind a VPN. [Tailscale](https://tailscale.com/) is the clean option: bind to the machine's tailscale IP (`--host <tailscale-ip>`) and use `http://<tailscale-ip>:9119` as the Remote URL so only your tailnet can reach it.
+:::
+
+### In the app
+
+**Settings → Gateway → Remote gateway:**
+
+1. **Remote URL** — `http://<backend-host>:9119` (path prefixes like `/hermes` work if you front it with a reverse proxy)
+2. **Session token** — paste the `$TOKEN` value from step 1
+3. **Test remote** — confirms the backend is reachable and the token is accepted
+4. **Save and reconnect** — switches the desktop shell onto the remote backend
+
+The token is stored encrypted in the app's local config; leave the field blank on a later edit to keep the saved one. You can also set it without the UI via the `HERMES_DESKTOP_REMOTE_URL` + `HERMES_DESKTOP_REMOTE_TOKEN` environment variables before launching the app (both must be set together; they override the in-app settings).
+
+### Troubleshooting
+
+- **Test fails with 401** — the token doesn't match the backend's `HERMES_DASHBOARD_SESSION_TOKEN`, or the backend is bound non-loopback *without* `--insecure` (OAuth gate is on, ignoring the token). Verify with `curl -s -H "X-Hermes-Session-Token: $TOKEN" http://<host>:9119/api/status` — that should return JSON, not a 401.
+- **Connection refused / times out** — the backend bound to `127.0.0.1` (the default) or a firewall/VPN is blocking the port. Bind to `0.0.0.0` or the tailscale IP and open the port to your trusted network.
+- **No token to copy** — expected. You mint it yourself; Hermes never surfaces the default ephemeral one.
+
+For the same setup from the web-dashboard angle, see [Web Dashboard → Connecting Hermes Desktop to a remote backend](./features/web-dashboard.md#connecting-hermes-desktop-to-a-remote-backend); the env vars are catalogued under [Environment Variables → Web Dashboard & Hermes Desktop](../reference/environment-variables.md#web-dashboard--hermes-desktop).
 
 ## Troubleshooting
 

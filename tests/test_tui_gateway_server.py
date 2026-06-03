@@ -10,6 +10,55 @@ from unittest.mock import patch
 from tui_gateway import server
 
 
+def test_session_context_uses_session_cwd(monkeypatch, tmp_path):
+    """Desktop/TUI sessions must pin the agent cwd per session.
+
+    The gateway process itself is often launched from apps/desktop in dev, so
+    falling back to os.getcwd() makes agents answer from the desktop app folder
+    even when the sidebar/session cwd is a real project.
+    """
+    from agent.runtime_cwd import resolve_agent_cwd
+
+    sid = "cwd-sid"
+    session_key = "cwd-key"
+    project = tmp_path / "project"
+    project.mkdir()
+    launcher = tmp_path / "apps" / "desktop"
+    launcher.mkdir(parents=True)
+
+    server._sessions[sid] = {"session_key": session_key, "cwd": str(project)}
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.chdir(launcher)
+
+    tokens = server._set_session_context(session_key)
+    try:
+        assert resolve_agent_cwd() == project
+    finally:
+        server._clear_session_context(tokens)
+        server._sessions.pop(sid, None)
+
+
+def test_session_context_explicit_cwd_for_ephemeral_task(monkeypatch, tmp_path):
+    """Background/preview tasks use ephemeral ids absent from `_sessions`, so the
+    parent workspace is passed explicitly; it must pin instead of clearing back
+    to the gateway launch dir."""
+    from agent.runtime_cwd import resolve_agent_cwd
+
+    project = tmp_path / "project"
+    project.mkdir()
+    launcher = tmp_path / "apps" / "desktop"
+    launcher.mkdir(parents=True)
+
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.chdir(launcher)
+
+    tokens = server._set_session_context("bg_deadbe", cwd=str(project))
+    try:
+        assert resolve_agent_cwd() == project
+    finally:
+        server._clear_session_context(tokens)
+
+
 class _ChunkyStdout:
     def __init__(self):
         self.parts: list[str] = []
@@ -82,6 +131,20 @@ def test_tui_verbose_tool_details_are_capped_before_emit(monkeypatch):
     assert capped.startswith("[showing verbose tail; omitted ")
     assert capped.endswith("three\nfour")
     assert "one" not in capped
+
+
+def test_tui_verbose_default_cap_stays_small(monkeypatch):
+    # Regression guard for #34095: the verbose tool text shipped to the TUI is
+    # rendered into a persisted, expanded-by-default trail block for the whole
+    # session. Raising this cap back toward the old 16KB re-introduces the Ink
+    # render-tree blowup that silently OOM-killed the TUI. Keep it small.
+    assert server._TUI_VERBOSE_TEXT_MAX_CHARS <= 2_000
+
+    huge = "x" * 40_000
+    capped = server._cap_tui_verbose_text(huge)
+
+    assert len(capped) < 2_000
+    assert capped.startswith("[showing verbose tail; omitted ")
 
 
 def test_tui_verbose_tool_events_omit_details_when_redaction_fails(monkeypatch):
