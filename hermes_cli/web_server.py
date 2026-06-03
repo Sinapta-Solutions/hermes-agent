@@ -1755,6 +1755,14 @@ def workspace_events(workspace_id: str, limit: int = 25):
 # ---------------------------------------------------------------------------
 
 _KANBAN_STATUSES = ("triage", "todo", "scheduled", "ready", "running", "blocked", "done")
+_KANBAN_WORKSPACE_KINDS = ("scratch", "dir", "worktree")
+
+
+def _normalize_kanban_workspace_kind(value: Any) -> str:
+    kind = str(value or "scratch").strip().lower() or "scratch"
+    if kind not in _KANBAN_WORKSPACE_KINDS:
+        raise HTTPException(status_code=400, detail="Invalid task workspace_kind")
+    return kind
 
 
 def _kanban_root() -> Path:
@@ -1918,7 +1926,7 @@ async def create_kanban_task(slug: str, request: Request):
         priority = 0
     tenant = str(body.get("tenant") or "").strip() or None
     workspace_path = str(body.get("workspace_path") or "").strip() or None
-    workspace_kind = str(body.get("workspace_kind") or "repo").strip() or "repo"
+    workspace_kind = _normalize_kanban_workspace_kind(body.get("workspace_kind"))
     task_id = f"t_{uuid.uuid4().hex[:12]}"
     now = int(time.time())
     conn = _connect_kanban_board(slug)
@@ -2140,7 +2148,7 @@ async def update_kanban_task(slug: str, task_id: str, request: Request):
         if "workspace_path" in body:
             updates["workspace_path"] = str(body.get("workspace_path") or "").strip() or None
         if "workspace_kind" in body:
-            updates["workspace_kind"] = str(body.get("workspace_kind") or "").strip() or "repo"
+            updates["workspace_kind"] = _normalize_kanban_workspace_kind(body.get("workspace_kind"))
         if "priority" in body:
             try:
                 updates["priority"] = int(body.get("priority") or 0)
