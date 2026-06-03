@@ -234,11 +234,6 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
                   <h2 className="text-lg font-semibold text-foreground">{editingId && !isCreating ? 'Edit workspace' : 'Create workspace'}</h2>
                   <p className="mt-1 text-sm text-(--ui-text-secondary)">Base durável para orquestração da M.i.A.</p>
                 </div>
-                {selected && (
-                  <Button onClick={() => startEdit(selected)} type="button" variant="secondary">
-                    Edit selected
-                  </Button>
-                )}
               </div>
 
               <div className="mt-5 grid gap-4 md:grid-cols-2">
