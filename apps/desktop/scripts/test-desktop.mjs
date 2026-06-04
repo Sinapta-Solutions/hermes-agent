@@ -11,6 +11,8 @@ const MODE = process.argv[2] || 'help'
 const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
 const RELEASE_ROOT = path.join(DESKTOP_ROOT, 'release')
 const PLATFORM = process.platform
+const BUILD_CONFIG = PACKAGE_JSON.build || {}
+const EXECUTABLE_NAME = BUILD_CONFIG.executableName || 'Hermes'
 
 // Platform-specific packaged-app layout. The thin installer ships an Electron
 // app shell plus extraResources (install-stamp.json + native-deps/) -- it
@@ -21,7 +23,7 @@ const APP = (() => {
     const appPath = path.join(RELEASE_ROOT, `mac-${ARCH}`, 'Hermes.app')
     return {
       appPath,
-      binary: path.join(appPath, 'Contents', 'MacOS', 'Hermes'),
+      binary: path.join(appPath, 'Contents', 'MacOS', EXECUTABLE_NAME),
       resourcesPath: path.join(appPath, 'Contents', 'Resources'),
       asarPath: path.join(appPath, 'Contents', 'Resources', 'app.asar'),
       unpackedDistIndex: path.join(appPath, 'Contents', 'Resources', 'app.asar.unpacked', 'dist', 'index.html')
@@ -31,13 +33,13 @@ const APP = (() => {
     const unpacked = path.join(RELEASE_ROOT, 'win-unpacked')
     return {
       appPath: unpacked,
-      binary: path.join(unpacked, 'Hermes.exe'),
+      binary: path.join(unpacked, `${EXECUTABLE_NAME}.exe`),
       resourcesPath: path.join(unpacked, 'resources'),
       asarPath: path.join(unpacked, 'resources', 'app.asar'),
       unpackedDistIndex: path.join(unpacked, 'resources', 'app.asar.unpacked', 'dist', 'index.html')
     }
   }
-  // linux unpacked layout matches windows but with different binary name
+
   const unpacked = path.join(RELEASE_ROOT, 'linux-unpacked')
   return {
     appPath: unpacked,
