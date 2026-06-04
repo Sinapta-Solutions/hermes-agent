@@ -236,7 +236,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "perMachine": false,
-      "runAfterFinish": false,
+      "runAfterFinish": true,
       "shortcutName": "Hermes",
       "uninstallDisplayName": "Hermes",
       "warningsAsErrors": false
