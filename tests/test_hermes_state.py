@@ -2685,6 +2685,65 @@ class TestListSessionsRich:
         assert top[0]["id"] == "tip1"
         assert top[0]["_lineage_root_id"] == "root1"
 
+    def test_min_messages_keeps_empty_compression_root_when_tip_has_messages(self, db):
+        """Desktop lists with min_messages=1 must not hide a compressed
+        first-turn root whose continuation holds the real transcript.
+        """
+        t0 = 1709500000.0
+        db.create_session("root", "cli")
+        with db._lock:
+            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "root"))
+            db._conn.execute(
+                "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=?",
+                (t0 + 1, "compression", "root"),
+            )
+        db.create_session("tip", "cli", parent_session_id="root")
+        with db._lock:
+            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 2, "tip"))
+        db.append_message("tip", "user", "first real prompt")
+        with db._lock:
+            db._conn.execute(
+                "UPDATE messages SET timestamp=? WHERE session_id=? AND content=?",
+                (t0 + 3, "tip", "first real prompt"),
+            )
+            db._conn.commit()
+
+        sessions = db.list_sessions_rich(limit=10, min_message_count=1, order_by_last_active=True)
+
+        assert [s["id"] for s in sessions] == ["tip"]
+        assert sessions[0]["_lineage_root_id"] == "root"
+        assert db.session_count(
+            min_message_count=1,
+            include_children=False,
+            project_compression_tips=True,
+        ) == 1
+
+    def test_session_count_matches_projected_pagination_with_min_messages(self, db):
+        """Desktop total must match the same logical list used for paging."""
+        t0 = 1709500000.0
+        db.create_session("root", "cli")
+        with db._lock:
+            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "root"))
+            db._conn.execute(
+                "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=?",
+                (t0 + 1, "compression", "root"),
+            )
+        db.create_session("tip", "cli", parent_session_id="root")
+        with db._lock:
+            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 2, "tip"))
+        db.append_message("tip", "user", "first real prompt")
+        db.create_session("other", "cli")
+        db.append_message("other", "user", "other prompt")
+
+        sessions = db.list_sessions_rich(limit=1, min_message_count=1, order_by_last_active=True)
+
+        assert len(sessions) == 1
+        assert db.session_count(
+            min_message_count=1,
+            include_children=False,
+            project_compression_tips=True,
+        ) == 2
+
     def test_rich_list_includes_title(self, db):
         db.create_session("s1", "cli")
         db.set_session_title("s1", "refactoring auth")
@@ -2872,6 +2931,29 @@ class TestCompressionChainProjection:
 
         assert tip_row["_lineage_root_id"] == "root1"
         assert tip_row["cwd"] == "/tmp/workspaces/tip"
+
+    def test_set_title_reuses_hidden_compression_root_title_on_tip(self, db):
+        import time as _time
+
+        self._build_compression_chain(db, _time.time() - 3600)
+        db.set_session_title("root1", "Kanban")
+
+        assert db.set_session_title("tip1", "Kanban") is True
+
+        assert db.get_session_title("root1") is None
+        assert db.get_session_title("tip1") == "Kanban"
+        sessions = db.list_sessions_rich(source="cli", limit=20)
+        tip_row = next(s for s in sessions if s["id"] == "tip1")
+        assert tip_row["title"] == "Kanban"
+
+    def test_set_title_rejects_same_title_outside_compression_lineage(self, db):
+        import time as _time
+
+        self._build_compression_chain(db, _time.time() - 3600)
+        db.set_session_title("root1", "Kanban")
+
+        with pytest.raises(ValueError, match="root1"):
+            db.set_session_title("delegate1", "Kanban")
 
     def test_list_without_projection_returns_raw_root(self, db):
         """project_compression_tips=False returns the raw parent-NULL root

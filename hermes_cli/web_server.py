@@ -2566,6 +2566,8 @@ async def get_sessions(
                 min_message_count=min_message_count,
                 include_archived=include_archived,
                 archived_only=archived_only,
+                include_children=False,
+                project_compression_tips=True,
             )
             now = time.time()
             for s in sessions:

@@ -57,7 +57,8 @@ import {
   $sessionsLoading,
   $sessionsTotal,
   $workingSessionIds,
-  sessionPinId
+  sessionPinId,
+  sessionSidebarTotals
 } from '@/store/session'
 
 import { AGENTS_ROUTE, type AppView, ARTIFACTS_ROUTE, KANBAN_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE, WORKSPACES_ROUTE } from '../../routes'
@@ -371,9 +372,13 @@ export function ChatSidebar({
 
   const showSessionSkeletons = sessionsLoading && sortedSessions.length === 0
   const showSessionSections = showSessionSkeletons || sortedSessions.length > 0
-  const knownSessionTotal = Math.max(sessionsTotal, sortedSessions.length)
-  const hasMoreSessions = knownSessionTotal > sortedSessions.length
-  const remainingSessionCount = Math.max(0, knownSessionTotal - sortedSessions.length)
+  const sessionTotals = sessionSidebarTotals({
+    loadedCount: sortedSessions.length,
+    pinnedCount: pinnedSessions.length,
+    serverTotal: sessionsTotal
+  })
+  const hasMoreSessions = sessionTotals.hasMore
+  const remainingSessionCount = sessionTotals.remaining
 
   const handlePinnedDragEnd = ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) {
@@ -553,7 +558,7 @@ export function ChatSidebar({
             dndSensors={dndSensors}
             emptyState={showSessionSkeletons ? <SidebarSessionSkeletons /> : <SidebarAllPinnedState />}
             footer={
-              !agentsGrouped && !showSessionSkeletons && hasMoreSessions ? (
+              !showSessionSkeletons && hasMoreSessions ? (
                 <SidebarLoadMoreRow
                   loading={sessionsLoading}
                   onClick={onLoadMoreSessions}
@@ -588,7 +593,7 @@ export function ChatSidebar({
               ) : null
             }
             label="Sessions"
-            labelMeta={countLabel(agentSessions.length, knownSessionTotal)}
+            labelMeta={countLabel(agentSessions.length, sessionTotals.knownRecentTotal)}
             onArchiveSession={onArchiveSession}
             onDeleteSession={onDeleteSession}
             onNewSessionInWorkspace={onNewSessionInWorkspace}

@@ -7,6 +7,7 @@ import {
   mergeSessionPage,
   sessionPinId,
   sessionRefreshKeepIds,
+  sessionSidebarTotals,
   setSessionAttention
 } from './session'
 
@@ -76,6 +77,26 @@ describe('sessionRefreshKeepIds', () => {
 
   it('combines working, pinned, and selected ids without duplicates', () => {
     expect([...sessionRefreshKeepIds(['a', 'b'], ['b', 'c'], 'a')]).toEqual(['a', 'b', 'c'])
+  })
+})
+
+describe('sessionSidebarTotals', () => {
+  it('does not treat loaded pinned sessions as missing recents', () => {
+    expect(sessionSidebarTotals({ loadedCount: 6, pinnedCount: 2, serverTotal: 6 })).toEqual({
+      knownTotal: 6,
+      knownRecentTotal: 4,
+      hasMore: false,
+      remaining: 0
+    })
+  })
+
+  it('keeps load more active when the server has sessions beyond the loaded page', () => {
+    expect(sessionSidebarTotals({ loadedCount: 6, pinnedCount: 2, serverTotal: 10 })).toEqual({
+      knownTotal: 10,
+      knownRecentTotal: 8,
+      hasMore: true,
+      remaining: 4
+    })
   })
 })
 

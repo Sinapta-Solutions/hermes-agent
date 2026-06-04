@@ -1390,26 +1390,97 @@ class SessionDB:
 
         return cleaned
 
+    @staticmethod
+    def _compression_lineage_ids_for_conn(
+        conn: sqlite3.Connection,
+        session_id: str,
+    ) -> set[str]:
+        """Return raw session ids in the same compression conversation.
+
+        Branches and delegate children are excluded. This is intentionally a
+        conn-scoped helper so title updates can inspect and adjust lineage rows
+        inside the same write transaction that enforces the unique title index.
+        """
+        row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if row is None:
+            return set()
+
+        ids = {session_id}
+        current = session_id
+        for _ in range(100):
+            parent = conn.execute(
+                """
+                SELECT p.id
+                FROM sessions child
+                JOIN sessions p ON p.id = child.parent_session_id
+                WHERE child.id = ?
+                  AND p.end_reason = 'compression'
+                  AND p.ended_at IS NOT NULL
+                  AND child.started_at >= p.ended_at
+                """,
+                (current,),
+            ).fetchone()
+            if parent is None or parent["id"] in ids:
+                break
+            current = parent["id"]
+            ids.add(current)
+
+        frontier = [current]
+        for _ in range(100):
+            if not frontier:
+                break
+            placeholders = ",".join("?" for _ in frontier)
+            rows = conn.execute(
+                f"""
+                SELECT child.id
+                FROM sessions parent
+                JOIN sessions child ON child.parent_session_id = parent.id
+                WHERE parent.id IN ({placeholders})
+                  AND parent.end_reason = 'compression'
+                  AND parent.ended_at IS NOT NULL
+                  AND child.started_at >= parent.ended_at
+                """,
+                frontier,
+            ).fetchall()
+            next_frontier = []
+            for child in rows:
+                child_id = child["id"]
+                if child_id not in ids:
+                    ids.add(child_id)
+                    next_frontier.append(child_id)
+            frontier = next_frontier
+
+        return ids
+
     def set_session_title(self, session_id: str, title: str) -> bool:
         """Set or update a session's title.
 
         Returns True if session was found and title was set.
-        Raises ValueError if title is already in use by another session,
+        Raises ValueError if title is already in use by another logical session,
         or if the title fails validation (too long, invalid characters).
         Empty/whitespace-only strings are normalized to None (clearing the title).
         """
         title = self.sanitize_title(title)
         def _do(conn):
             if title:
-                # Check uniqueness (allow the same session to keep its own title)
+                # Check uniqueness (allow rows from the same compression
+                # conversation to hand the title forward to the live tip).
                 cursor = conn.execute(
                     "SELECT id FROM sessions WHERE title = ? AND id != ?",
                     (title, session_id),
                 )
-                conflict = cursor.fetchone()
-                if conflict:
-                    raise ValueError(
-                        f"Title '{title}' is already in use by session {conflict['id']}"
+                conflicts = [row["id"] for row in cursor.fetchall()]
+                if conflicts:
+                    lineage_ids = self._compression_lineage_ids_for_conn(conn, session_id)
+                    outside_lineage = [cid for cid in conflicts if cid not in lineage_ids]
+                    if outside_lineage:
+                        raise ValueError(
+                            f"Title '{title}' is already in use by session {outside_lineage[0]}"
+                        )
+                    placeholders = ",".join("?" for _ in conflicts)
+                    conn.execute(
+                        f"UPDATE sessions SET title = NULL WHERE id IN ({placeholders})",
+                        conflicts,
                     )
             cursor = conn.execute(
                 "UPDATE sessions SET title = ? WHERE id = ?",
@@ -1618,8 +1689,45 @@ class SessionDB:
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
         if min_message_count > 0:
-            where_clauses.append("s.message_count >= ?")
-            params.append(min_message_count)
+            if project_compression_tips and not include_children:
+                # Apply the message-count filter to the surfaced logical
+                # conversation, not only the raw root row. A first-turn Desktop
+                # session can compress before any message is flushed to the
+                # root; its continuation then holds the real transcript. If we
+                # filter the empty root here, the sidebar can never project it
+                # to the live tip after an app restart.
+                where_clauses.append(
+                    """(
+                    s.message_count >= ?
+                    OR (
+                        s.end_reason = 'compression'
+                        AND EXISTS (
+                            WITH RECURSIVE compression_descendants(cur_id) AS (
+                                SELECT child.id
+                                FROM sessions child
+                                WHERE child.parent_session_id = s.id
+                                  AND child.started_at >= s.ended_at
+                                UNION ALL
+                                SELECT child.id
+                                FROM compression_descendants d
+                                JOIN sessions parent ON parent.id = d.cur_id
+                                JOIN sessions child ON child.parent_session_id = d.cur_id
+                                WHERE parent.end_reason = 'compression'
+                                  AND child.started_at >= parent.ended_at
+                            )
+                            SELECT 1
+                            FROM compression_descendants d
+                            JOIN sessions ds ON ds.id = d.cur_id
+                            WHERE ds.message_count >= ?
+                            LIMIT 1
+                        )
+                    )
+                    )"""
+                )
+                params.extend([min_message_count, min_message_count])
+            else:
+                where_clauses.append("s.message_count >= ?")
+                params.append(min_message_count)
         if archived_only:
             where_clauses.append("s.archived = 1")
         elif not include_archived:
@@ -3053,26 +3161,75 @@ class SessionDB:
         min_message_count: int = 0,
         include_archived: bool = False,
         archived_only: bool = False,
+        include_children: bool = True,
+        project_compression_tips: bool = False,
     ) -> int:
-        """Count sessions, optionally filtered by source."""
+        """Count sessions, optionally filtered by source.
+
+        Defaults to raw session rows for stats/admin callers. Desktop history
+        callers can pass ``include_children=False`` and
+        ``project_compression_tips=True`` to match ``list_sessions_rich``.
+        """
         where_clauses = []
         params = []
 
+        if not include_children:
+            # Keep top-level conversations and explicit branch children visible,
+            # matching list_sessions_rich(). Hide delegate/compression children
+            # unless projected through their root.
+            where_clauses.append(
+                """(s.parent_session_id IS NULL OR EXISTS (
+                    SELECT 1 FROM sessions parent
+                    WHERE parent.id = s.parent_session_id
+                      AND parent.end_reason = 'branched'
+                ))"""
+            )
         if source:
-            where_clauses.append("source = ?")
+            where_clauses.append("s.source = ?")
             params.append(source)
         if min_message_count > 0:
-            where_clauses.append("message_count >= ?")
-            params.append(min_message_count)
+            if project_compression_tips and not include_children:
+                where_clauses.append(
+                    """(
+                    s.message_count >= ?
+                    OR (
+                        s.end_reason = 'compression'
+                        AND EXISTS (
+                            WITH RECURSIVE compression_descendants(cur_id) AS (
+                                SELECT child.id
+                                FROM sessions child
+                                WHERE child.parent_session_id = s.id
+                                  AND child.started_at >= s.ended_at
+                                UNION ALL
+                                SELECT child.id
+                                FROM compression_descendants d
+                                JOIN sessions parent ON parent.id = d.cur_id
+                                JOIN sessions child ON child.parent_session_id = d.cur_id
+                                WHERE parent.end_reason = 'compression'
+                                  AND child.started_at >= parent.ended_at
+                            )
+                            SELECT 1
+                            FROM compression_descendants d
+                            JOIN sessions ds ON ds.id = d.cur_id
+                            WHERE ds.message_count >= ?
+                            LIMIT 1
+                        )
+                    )
+                    )"""
+                )
+                params.extend([min_message_count, min_message_count])
+            else:
+                where_clauses.append("s.message_count >= ?")
+                params.append(min_message_count)
         if archived_only:
-            where_clauses.append("archived = 1")
+            where_clauses.append("s.archived = 1")
         elif not include_archived:
-            where_clauses.append("archived = 0")
+            where_clauses.append("s.archived = 0")
 
         where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
         with self._lock:
-            cursor = self._conn.execute(f"SELECT COUNT(*) FROM sessions{where_sql}", params)
+            cursor = self._conn.execute(f"SELECT COUNT(*) FROM sessions s{where_sql}", params)
             return cursor.fetchone()[0]
 
     def message_count(self, session_id: str = None) -> int:

@@ -27,6 +27,35 @@ function updateAtom<T>(store: AppAtom<T>, next: Updater<T>) {
 export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'id'>): string =>
   session._lineage_root_id ?? session.id
 
+export interface SessionSidebarTotals {
+  knownTotal: number
+  knownRecentTotal: number
+  hasMore: boolean
+  remaining: number
+}
+
+export function sessionSidebarTotals({
+  loadedCount,
+  pinnedCount,
+  serverTotal
+}: {
+  loadedCount: number
+  pinnedCount: number
+  serverTotal: number
+}): SessionSidebarTotals {
+  const safeLoaded = Math.max(0, Math.floor(loadedCount))
+  const safePinned = Math.max(0, Math.floor(pinnedCount))
+  const knownTotal = Math.max(Math.max(0, Math.floor(serverTotal)), safeLoaded)
+  const loadedPinned = Math.min(safePinned, safeLoaded)
+
+  return {
+    knownTotal,
+    knownRecentTotal: Math.max(0, knownTotal - loadedPinned),
+    hasMore: knownTotal > safeLoaded,
+    remaining: Math.max(0, knownTotal - safeLoaded)
+  }
+}
+
 export function sessionRefreshKeepIds(
   workingSessionIds: readonly string[],
   pinnedSessionIds: readonly string[],
