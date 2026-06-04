@@ -99,6 +99,15 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+VALID_WORKFLOW_STEP_TYPES = {
+    "planning", "implementation", "review", "audit", "test", "docs",
+    "handoff", "custom",
+}
+VALID_WORKFLOW_STEP_STATUSES = {
+    "pending", "ready", "running", "passed", "failed", "blocked", "skipped",
+}
+WORKFLOW_ROUTE_VERSION = 1
+JURISHUB_WORKFLOW_PRESET_ID = "jurishub-standard"
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -750,6 +759,10 @@ class Task:
     current_run_id: Optional[int] = None
     workflow_template_id: Optional[str] = None
     current_step_key: Optional[str] = None
+    # Canonical JSON workflow route for multi-agent card execution.
+    # Stored on tasks.workflow_route as JSON and exposed to clients as
+    # workflowRoute. None keeps legacy cards on the old single-worker path.
+    workflow_route: Optional[dict] = None
     # Force-loaded skills for the worker on this task (appended to the
     # dispatcher's built-in `kanban-worker` via --skills). Stored as a
     # JSON array of skill names. None = use only the defaults; empty
@@ -796,6 +809,14 @@ class Task:
                     skills_value = [str(s) for s in parsed if s]
             except Exception:
                 skills_value = None
+        workflow_route_value: Optional[dict] = None
+        if "workflow_route" in keys and row["workflow_route"]:
+            try:
+                parsed_route = json.loads(row["workflow_route"])
+                if isinstance(parsed_route, dict):
+                    workflow_route_value = parsed_route
+            except Exception:
+                workflow_route_value = None
         return cls(
             id=row["id"],
             title=row["title"],
@@ -844,6 +865,7 @@ class Task:
             current_step_key=(
                 row["current_step_key"] if "current_step_key" in keys else None
             ),
+            workflow_route=workflow_route_value,
             skills=skills_value,
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
             max_retries=(
@@ -990,6 +1012,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- them; the dispatcher doesn't consult them for routing yet.
     workflow_template_id TEXT,
     current_step_key     TEXT,
+    -- Canonical multi-agent workflow route, stored as JSON. NULL preserves
+    -- legacy single-worker Kanban semantics for existing cards.
+    workflow_route       TEXT,
     -- Force-loaded skills for the worker on this task, stored as JSON.
     -- Appended to the dispatcher's built-in `--skills kanban-worker`.
     -- NULL or empty array = no extras.
@@ -1635,6 +1660,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(
             conn, "tasks", "current_step_key", "current_step_key TEXT"
         )
+    if "workflow_route" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "workflow_route", "workflow_route TEXT"
+        )
     if "skills" not in cols:
         # JSON array of skill names the dispatcher force-loads into the
         # worker (additive to the built-in `kanban-worker`). NULL is fine
@@ -2054,6 +2083,7 @@ def create_task(
     initial_status: str = "running",
     session_id: Optional[str] = None,
     board: Optional[str] = None,
+    workflow_route: Optional[dict] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2176,6 +2206,20 @@ def create_task(
         if board_default:
             workspace_path = str(board_default)
 
+    workflow_payload = normalize_workflow_route(workflow_route)
+    workflow_template_id = None
+    workflow_current_step_key = None
+    workflow_payload_json = None
+    if workflow_payload:
+        next_step = workflow_next_ready_step(workflow_payload)
+        workflow_template_id = workflow_payload.get("template_id")
+        workflow_current_step_key = next_step.get("id") if next_step else workflow_payload.get("current_step_id")
+        workflow_payload["current_step_id"] = workflow_current_step_key
+        step_assignee = _workflow_step_assignee(next_step, assignee)
+        if step_assignee:
+            assignee = step_assignee
+        workflow_payload_json = _json_dumps_stable(workflow_payload)
+
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
         task_id = _new_task_id()
@@ -2219,8 +2263,9 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
+                        workflow_template_id, current_step_key, workflow_route,
                         skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2237,6 +2282,9 @@ def create_task(
                         tenant,
                         idempotency_key,
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
+                        workflow_template_id,
+                        workflow_current_step_key,
+                        workflow_payload_json,
                         json.dumps(skills_list) if skills_list is not None else None,
                         int(max_retries) if max_retries is not None else None,
                         1 if goal_mode else 0,
@@ -2261,6 +2309,8 @@ def create_task(
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
                         "goal_mode": bool(goal_mode) or None,
+                        "workflow_template_id": workflow_template_id,
+                        "current_step_key": workflow_current_step_key,
                     },
                 )
             return task_id
@@ -2288,6 +2338,647 @@ def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> l
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return Task.from_row(row) if row else None
+
+
+def _json_dumps_stable(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _workflow_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _workflow_now_ts(now: Optional[int] = None) -> int:
+    return int(now if now is not None else time.time())
+
+
+def normalize_workflow_route(route: Any) -> Optional[dict]:
+    """Return the canonical workflowRoute object, or None for legacy cards."""
+    if route is None:
+        return None
+    if isinstance(route, str):
+        text = route.strip()
+        if not text:
+            return None
+        try:
+            route = json.loads(text)
+        except Exception as exc:
+            raise ValueError(f"invalid workflow_route JSON: {exc}") from exc
+    if isinstance(route, list):
+        route = {"version": WORKFLOW_ROUTE_VERSION, "steps": route}
+    if not isinstance(route, dict):
+        raise ValueError("workflow_route must be a JSON object or list of steps")
+
+    raw_steps = route.get("steps") or []
+    if not isinstance(raw_steps, list):
+        raise ValueError("workflow_route.steps must be a list")
+
+    steps: list[dict] = []
+    seen_ids: set[str] = set()
+    for idx, raw_step in enumerate(raw_steps, start=1):
+        if not isinstance(raw_step, dict):
+            raise ValueError("workflow route steps must be objects")
+        step_id = str(raw_step.get("id") or raw_step.get("key") or f"step-{idx}").strip()
+        if not step_id:
+            raise ValueError("workflow step id must be non-empty")
+        if step_id in seen_ids:
+            raise ValueError(f"duplicate workflow step id: {step_id}")
+        seen_ids.add(step_id)
+
+        step_type = str(raw_step.get("type") or "custom").strip().lower()
+        if step_type not in VALID_WORKFLOW_STEP_TYPES:
+            step_type = "custom"
+        status = str(raw_step.get("status") or "pending").strip().lower()
+        if status not in VALID_WORKFLOW_STEP_STATUSES:
+            status = "pending"
+        evidence = raw_step.get("evidence") or []
+        if isinstance(evidence, dict):
+            evidence = [evidence]
+        elif not isinstance(evidence, list):
+            evidence = [str(evidence)] if evidence else []
+        timestamps = raw_step.get("timestamps") or {}
+        if not isinstance(timestamps, dict):
+            timestamps = {}
+
+        max_retries = raw_step.get("max_retries", raw_step.get("maxRetries"))
+        try:
+            max_retries = int(max_retries) if max_retries is not None else None
+        except (TypeError, ValueError):
+            max_retries = None
+        retry_count = raw_step.get("retry_count", raw_step.get("retryCount", 0))
+        try:
+            retry_count = max(0, int(retry_count or 0))
+        except (TypeError, ValueError):
+            retry_count = 0
+
+        assignee = (
+            raw_step.get("assignee")
+            or raw_step.get("profile")
+            or raw_step.get("agent")
+        )
+        assignee = str(assignee).strip() if assignee else None
+        step = {
+            "id": step_id,
+            "title": str(raw_step.get("title") or raw_step.get("name") or step_id).strip(),
+            "type": step_type,
+            "assignee": assignee,
+            "status": status,
+            "depends_on": _workflow_list(raw_step.get("depends_on", raw_step.get("dependencies"))),
+            "validation_criteria": _workflow_list(raw_step.get("validation_criteria", raw_step.get("criteria"))),
+            "evidence": evidence,
+            "timestamps": timestamps,
+            "run_id": raw_step.get("run_id", raw_step.get("runId")),
+            "session_id": raw_step.get("session_id", raw_step.get("sessionId")),
+            "retry_count": retry_count,
+            "max_retries": max_retries,
+        }
+        steps.append(step)
+
+    current_step_id = route.get("current_step_id") or route.get("currentStepId")
+    current_step_id = str(current_step_id).strip() if current_step_id else None
+    template_id = route.get("template_id") or route.get("templateId")
+    template_id = str(template_id).strip() if template_id else None
+    normalized = {
+        "version": int(route.get("version") or WORKFLOW_ROUTE_VERSION),
+        "template_id": template_id,
+        "current_step_id": current_step_id,
+        "steps": steps,
+    }
+    return _refresh_workflow_route(normalized)
+
+
+def _workflow_step(route: Optional[dict], step_id: Optional[str]) -> Optional[dict]:
+    if not route or not step_id:
+        return None
+    for step in route.get("steps") or []:
+        if step.get("id") == step_id:
+            return step
+    return None
+
+
+def _workflow_terminal_ids(route: dict) -> set[str]:
+    return {
+        str(step.get("id"))
+        for step in route.get("steps") or []
+        if step.get("status") in {"passed", "skipped"}
+    }
+
+
+def _workflow_dependencies_satisfied(route: dict, step: dict) -> bool:
+    terminal = _workflow_terminal_ids(route)
+    return all(dep in terminal for dep in step.get("depends_on") or [])
+
+
+def _refresh_workflow_route(route: dict, *, now: Optional[int] = None) -> dict:
+    """Promote dependency-satisfied pending steps to ready in-memory."""
+    ts = _workflow_now_ts(now)
+    steps = route.get("steps") or []
+    changed = True
+    while changed:
+        changed = False
+        for step in steps:
+            if step.get("status") == "pending" and _workflow_dependencies_satisfied(route, step):
+                step["status"] = "ready"
+                step.setdefault("timestamps", {})["ready_at"] = ts
+                changed = True
+    current = route.get("current_step_id")
+    if not _workflow_step(route, current):
+        current = None
+    if current is None or (_workflow_step(route, current) or {}).get("status") in {"passed", "skipped"}:
+        next_step = workflow_next_ready_step(route)
+        route["current_step_id"] = next_step.get("id") if next_step else None
+    return route
+
+
+def workflow_next_ready_step(route: Optional[dict]) -> Optional[dict]:
+    if not route:
+        return None
+    for step in route.get("steps") or []:
+        if step.get("status") == "ready" and _workflow_dependencies_satisfied(route, step):
+            return step
+    return None
+
+
+def workflow_is_complete(route: Optional[dict]) -> bool:
+    steps = (route or {}).get("steps") or []
+    return bool(steps) and all(step.get("status") in {"passed", "skipped"} for step in steps)
+
+
+def _workflow_step_assignee(step: Optional[dict], fallback: Optional[str]) -> Optional[str]:
+    if not step:
+        return _canonical_assignee(fallback)
+    return _canonical_assignee(step.get("assignee") or fallback)
+
+
+def _workflow_route_json(route: Optional[dict]) -> Optional[str]:
+    normalized = normalize_workflow_route(route)
+    return _json_dumps_stable(normalized) if normalized else None
+
+
+def _workflow_set_step_evidence(
+    step: dict,
+    *,
+    text: Optional[str] = None,
+    kind: str = "note",
+    run_id: Optional[int] = None,
+    metadata: Optional[dict] = None,
+    now: Optional[int] = None,
+) -> None:
+    evidence = step.setdefault("evidence", [])
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "created_at": _workflow_now_ts(now),
+    }
+    if text:
+        payload["text"] = str(text)
+    if run_id is not None:
+        payload["run_id"] = int(run_id)
+    if metadata:
+        payload["metadata"] = metadata
+    evidence.append(payload)
+
+
+def _workflow_update_task_route_locked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    route: dict,
+    *,
+    status: Optional[str] = None,
+    assignee: Optional[str] = None,
+    current_step_key: Optional[str] = None,
+    completed_at: Any = None,
+    result: Any = None,
+) -> None:
+    normalized = normalize_workflow_route(route)
+    template_id = normalized.get("template_id") if normalized else None
+    if current_step_key is None and normalized:
+        current_step_key = normalized.get("current_step_id")
+    assignments = [
+        "workflow_route = ?",
+        "workflow_template_id = ?",
+        "current_step_key = ?",
+    ]
+    params: list[Any] = [
+        _json_dumps_stable(normalized) if normalized else None,
+        template_id,
+        current_step_key,
+    ]
+    if status is not None:
+        assignments.append("status = ?")
+        params.append(status)
+    if assignee is not None:
+        assignments.append("assignee = ?")
+        params.append(assignee)
+    if completed_at is not None:
+        assignments.append("completed_at = ?")
+        params.append(completed_at)
+    if result is not None:
+        assignments.append("result = ?")
+        params.append(result)
+    params.append(task_id)
+    conn.execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?", params)
+
+
+def set_workflow_route(
+    conn: sqlite3.Connection,
+    task_id: str,
+    route: Any,
+    *,
+    actor: str = "cli",
+) -> dict:
+    normalized = normalize_workflow_route(route)
+    if not normalized:
+        raise ValueError("workflow route must contain at least one step")
+    with write_txn(conn):
+        task = conn.execute("SELECT id, assignee, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise ValueError(f"unknown task {task_id}")
+        next_step = workflow_next_ready_step(normalized)
+        current_step_id = next_step.get("id") if next_step else normalized.get("current_step_id")
+        normalized["current_step_id"] = current_step_id
+        next_assignee = _workflow_step_assignee(next_step, task["assignee"])
+        new_status = task["status"]
+        if new_status not in {"running", "blocked", "done", "archived", "review"} and next_step:
+            new_status = "ready"
+        _workflow_update_task_route_locked(
+            conn,
+            task_id,
+            normalized,
+            status=new_status,
+            assignee=next_assignee,
+            current_step_key=current_step_id,
+        )
+        _append_event(
+            conn,
+            task_id,
+            "workflow.route.set",
+            {"actor": actor, "template_id": normalized.get("template_id"), "steps": len(normalized.get("steps") or [])},
+        )
+    return normalized
+
+
+def workflow_apply_preset(
+    conn: sqlite3.Connection,
+    task_id: str,
+    preset_id: str,
+    *,
+    assignee: Optional[str] = None,
+    actor: str = "cli",
+) -> dict:
+    preset = preset_id.strip().lower()
+    if preset not in {"jurishub", JURISHUB_WORKFLOW_PRESET_ID}:
+        raise ValueError(f"unknown workflow preset: {preset_id}")
+    fallback = _canonical_assignee(assignee)
+    if fallback is None:
+        row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        fallback = _canonical_assignee(row["assignee"] if row else None) or "default"
+    steps = [
+        ("planning", "Planejamento", "planning", []),
+        ("implementation", "Implementação", "implementation", ["planning"]),
+        ("review", "Revisão", "review", ["implementation"]),
+        ("audit", "Auditoria", "audit", ["review"]),
+        ("tests", "Testes", "test", ["audit"]),
+        ("docs", "Documentação", "docs", ["tests"]),
+        ("handoff", "Handoff final", "handoff", ["docs"]),
+    ]
+    route = {
+        "version": WORKFLOW_ROUTE_VERSION,
+        "template_id": JURISHUB_WORKFLOW_PRESET_ID,
+        "policy": {
+            "name": "JurisHUB branch promotion policy",
+            "dev": "recebe todo material de trabalho",
+            "beta_promotion": (
+                "beta-dev/beta só deve levar código de aplicação; docs/scripts "
+                "auxiliares não devem ser promovidos salvo quando forem parte funcional"
+            ),
+        },
+        "steps": [
+            {
+                "id": sid,
+                "title": title,
+                "type": typ,
+                "assignee": fallback,
+                "depends_on": deps,
+                "status": "pending",
+                "validation_criteria": [f"Critérios da etapa {title} registrados no card"],
+                "max_retries": 1,
+            }
+            for sid, title, typ, deps in steps
+        ],
+    }
+    return set_workflow_route(conn, task_id, route, actor=actor)
+
+
+def add_workflow_step(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    step_id: str,
+    title: Optional[str] = None,
+    step_type: str = "custom",
+    assignee: Optional[str] = None,
+    depends_on: Optional[Iterable[str]] = None,
+    validation_criteria: Optional[Iterable[str]] = None,
+    max_retries: Optional[int] = None,
+    actor: str = "cli",
+) -> dict:
+    with write_txn(conn):
+        row = conn.execute("SELECT workflow_route, assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"unknown task {task_id}")
+        route = normalize_workflow_route(row["workflow_route"] or {"steps": []}) or {"version": WORKFLOW_ROUTE_VERSION, "steps": []}
+        if _workflow_step(route, step_id):
+            raise ValueError(f"workflow step already exists: {step_id}")
+        step = {
+            "id": step_id,
+            "title": title or step_id,
+            "type": step_type if step_type in VALID_WORKFLOW_STEP_TYPES else "custom",
+            "assignee": _canonical_assignee(assignee) or _canonical_assignee(row["assignee"]),
+            "status": "pending",
+            "depends_on": list(depends_on or []),
+            "validation_criteria": list(validation_criteria or []),
+            "evidence": [],
+            "timestamps": {},
+            "run_id": None,
+            "session_id": None,
+            "retry_count": 0,
+            "max_retries": max_retries,
+        }
+        route.setdefault("steps", []).append(step)
+        route = _refresh_workflow_route(route)
+        next_step = workflow_next_ready_step(route)
+        route["current_step_id"] = route.get("current_step_id") or (next_step.get("id") if next_step else None)
+        _workflow_update_task_route_locked(
+            conn,
+            task_id,
+            route,
+            current_step_key=route.get("current_step_id"),
+            assignee=_workflow_step_assignee(next_step, row["assignee"]) if next_step else row["assignee"],
+        )
+        _append_event(conn, task_id, "workflow.step.added", {"actor": actor, "step_id": step_id})
+    return route
+
+
+def update_workflow_step(
+    conn: sqlite3.Connection,
+    task_id: str,
+    step_id: str,
+    *,
+    status: Optional[str] = None,
+    evidence: Optional[str] = None,
+    assignee: Optional[str] = None,
+    actor: str = "cli",
+    run_id: Optional[int] = None,
+) -> dict:
+    with write_txn(conn):
+        row = conn.execute("SELECT workflow_route, assignee, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"unknown task {task_id}")
+        route = normalize_workflow_route(row["workflow_route"])
+        if not route:
+            raise ValueError(f"task {task_id} has no workflow route")
+        step = _workflow_step(route, step_id)
+        if not step:
+            raise ValueError(f"workflow step not found: {step_id}")
+        if status:
+            status = status.strip().lower()
+            if status not in VALID_WORKFLOW_STEP_STATUSES:
+                raise ValueError(f"status must be one of {sorted(VALID_WORKFLOW_STEP_STATUSES)}")
+            step["status"] = status
+            step.setdefault("timestamps", {})[f"{status}_at"] = int(time.time())
+        if evidence:
+            _workflow_set_step_evidence(step, text=evidence, kind="operator", run_id=run_id, now=int(time.time()))
+        if assignee is not None:
+            step["assignee"] = _canonical_assignee(assignee)
+        route = _refresh_workflow_route(route)
+        next_step = workflow_next_ready_step(route)
+        final = workflow_is_complete(route)
+        current_step_id = None if final else (next_step.get("id") if next_step else route.get("current_step_id"))
+        route["current_step_id"] = current_step_id
+        task_status = "done" if final else ("blocked" if status == "blocked" else row["status"])
+        if not final and next_step and task_status not in {"running", "blocked", "archived", "done"}:
+            task_status = "ready"
+        _workflow_update_task_route_locked(
+            conn,
+            task_id,
+            route,
+            status=task_status,
+            assignee=_workflow_step_assignee(next_step, row["assignee"]) if next_step else row["assignee"],
+            current_step_key=current_step_id,
+            completed_at=int(time.time()) if final else None,
+        )
+        event_payload: dict[str, Any] = {"actor": actor, "step_id": step_id, "status": status, "has_evidence": bool(evidence)}
+        if run_id is not None:
+            event_payload["run_id"] = int(run_id)
+        _append_event(conn, task_id, "workflow.step.updated", event_payload, run_id=run_id)
+    return route
+
+
+def record_workflow_evidence(
+    conn: sqlite3.Connection,
+    task_id: str,
+    step_id: str,
+    evidence: str,
+    *,
+    actor: str = "cli",
+    run_id: Optional[int] = None,
+) -> dict:
+    return update_workflow_step(conn, task_id, step_id, evidence=evidence, actor=actor, run_id=run_id)
+
+
+def workflow_active_tasks(conn: sqlite3.Connection) -> list[Task]:
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE workflow_route IS NOT NULL AND status != 'archived' "
+        "ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
+    return [Task.from_row(row) for row in rows]
+
+
+def workflow_prepare_next_step(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """Persist and return the next ready workflow step before dispatch."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT workflow_route, current_step_key, assignee, status FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["status"] != "ready" or not row["workflow_route"]:
+            return None
+        route = normalize_workflow_route(row["workflow_route"])
+        if not route:
+            return None
+        next_step = workflow_next_ready_step(route)
+        if next_step is None and workflow_is_complete(route):
+            _workflow_update_task_route_locked(
+                conn, task_id, route, status="done", current_step_key=None, completed_at=int(time.time())
+            )
+            _append_event(conn, task_id, "workflow.completed", {"source": "dispatcher"})
+            return None
+        if next_step is None:
+            conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'", (task_id,))
+            _append_event(conn, task_id, "workflow.waiting", {"reason": "no_dependency_satisfied_step"})
+            return None
+        route["current_step_id"] = next_step["id"]
+        next_assignee = _workflow_step_assignee(next_step, row["assignee"])
+        _workflow_update_task_route_locked(
+            conn,
+            task_id,
+            route,
+            status="ready",
+            assignee=next_assignee,
+            current_step_key=next_step["id"],
+        )
+        _append_event(
+            conn,
+            task_id,
+            "workflow.step.ready",
+            {"step_id": next_step["id"], "assignee": next_assignee},
+        )
+        return dict(next_step)
+
+
+def _workflow_mark_running_locked(conn: sqlite3.Connection, task_id: str, *, run_id: int, now: int) -> None:
+    row = conn.execute("SELECT workflow_route, current_step_key FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or not row["workflow_route"] or not row["current_step_key"]:
+        return
+    route = normalize_workflow_route(row["workflow_route"])
+    step = _workflow_step(route, row["current_step_key"])
+    if not route or not step:
+        return
+    step["status"] = "running"
+    step["run_id"] = int(run_id)
+    step.setdefault("timestamps", {})["started_at"] = now
+    route["current_step_id"] = step["id"]
+    _workflow_update_task_route_locked(conn, task_id, route, current_step_key=step["id"])
+    _append_event(conn, task_id, "workflow.step.running", {"step_id": step["id"], "run_id": int(run_id)}, run_id=run_id)
+
+
+def _workflow_complete_step_locked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    route: dict,
+    step_id: str,
+    run_id: Optional[int],
+    summary: Optional[str],
+    result: Optional[str],
+    metadata: Optional[dict],
+    verified_cards: Optional[list[str]],
+    now: int,
+) -> bool:
+    step = _workflow_step(route, step_id)
+    if not step:
+        raise ValueError(f"workflow step not found: {step_id}")
+    step["status"] = "passed"
+    step["run_id"] = run_id or step.get("run_id")
+    step.setdefault("timestamps", {})["completed_at"] = now
+    _workflow_set_step_evidence(
+        step,
+        text=summary or result,
+        kind="completion",
+        run_id=run_id,
+        metadata=metadata,
+        now=now,
+    )
+    route = _refresh_workflow_route(route, now=now)
+    next_step = workflow_next_ready_step(route)
+    final_done = next_step is None and workflow_is_complete(route)
+    route["current_step_id"] = None if final_done else (next_step.get("id") if next_step else None)
+    if final_done:
+        _workflow_update_task_route_locked(
+            conn,
+            task_id,
+            route,
+            status="done",
+            current_step_key=None,
+            completed_at=now,
+            result=result,
+        )
+        completed_payload: dict[str, Any] = {
+            "result_len": len(result) if result else 0,
+            "summary": ((summary if summary is not None else result) or "").strip().splitlines()[0][:400] or None,
+            "workflow_route": True,
+        }
+        if verified_cards:
+            completed_payload["verified_cards"] = verified_cards
+        if isinstance(metadata, dict) and isinstance(metadata.get("artifacts"), (list, tuple)):
+            completed_payload["artifacts"] = [str(p).strip() for p in metadata.get("artifacts") if str(p).strip()]
+        _append_event(conn, task_id, "completed", completed_payload, run_id=run_id)
+        _append_event(conn, task_id, "workflow.completed", {"step_id": step_id}, run_id=run_id)
+    else:
+        next_assignee = _workflow_step_assignee(next_step, None)
+        _workflow_update_task_route_locked(
+            conn,
+            task_id,
+            route,
+            status="ready" if next_step else "todo",
+            assignee=next_assignee,
+            current_step_key=route.get("current_step_id"),
+        )
+        _append_event(conn, task_id, "workflow.step.passed", {"step_id": step_id, "next_step_id": route.get("current_step_id")}, run_id=run_id)
+        if next_step:
+            _append_event(conn, task_id, "workflow.step.ready", {"step_id": next_step["id"], "assignee": next_assignee}, run_id=run_id)
+    return final_done
+
+
+def _workflow_mark_step_blocked_locked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: Optional[str],
+    run_id: Optional[int],
+    now: Optional[int] = None,
+) -> None:
+    row = conn.execute("SELECT workflow_route, current_step_key FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or not row["workflow_route"] or not row["current_step_key"]:
+        return
+    route = normalize_workflow_route(row["workflow_route"])
+    step = _workflow_step(route, row["current_step_key"])
+    if not route or not step:
+        return
+    step["status"] = "blocked"
+    step.setdefault("timestamps", {})["blocked_at"] = _workflow_now_ts(now)
+    _workflow_set_step_evidence(step, text=reason, kind="blocked", run_id=run_id, now=now)
+    route["current_step_id"] = step["id"]
+    _workflow_update_task_route_locked(conn, task_id, route, status="blocked", current_step_key=step["id"])
+    _append_event(conn, task_id, "workflow.step.blocked", {"step_id": step["id"], "reason": reason}, run_id=run_id)
+
+
+def _workflow_record_failure_locked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    error: str,
+    outcome: str,
+    blocked: bool,
+    run_id: Optional[int] = None,
+    now: Optional[int] = None,
+) -> None:
+    row = conn.execute("SELECT workflow_route, current_step_key FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or not row["workflow_route"] or not row["current_step_key"]:
+        return
+    route = normalize_workflow_route(row["workflow_route"])
+    step = _workflow_step(route, row["current_step_key"])
+    if not route or not step:
+        return
+    step["retry_count"] = int(step.get("retry_count") or 0) + 1
+    step["status"] = "blocked" if blocked else "ready"
+    step.setdefault("timestamps", {})["failed_at" if blocked else "retry_ready_at"] = _workflow_now_ts(now)
+    _workflow_set_step_evidence(step, text=error[:500], kind=outcome, run_id=run_id, now=now)
+    route["current_step_id"] = step["id"]
+    _workflow_update_task_route_locked(conn, task_id, route, current_step_key=step["id"])
+    _append_event(
+        conn,
+        task_id,
+        "workflow.step.failed" if blocked else "workflow.step.retry",
+        {"step_id": step["id"], "outcome": outcome, "error": error[:500], "retry_count": step["retry_count"]},
+        run_id=run_id,
+    )
 
 
 # Canonical sort-order mappings for ``hermes kanban list --sort``.
@@ -3058,6 +3749,7 @@ def claim_task(
             "UPDATE tasks SET current_run_id = ? WHERE id = ?",
             (run_id, task_id),
         )
+        _workflow_mark_running_locked(conn, task_id, run_id=int(run_id), now=now)
         _append_event(
             conn, task_id, "claimed",
             {"lock": lock, "expires": expires, "run_id": run_id},
@@ -3371,7 +4063,7 @@ def reclaim_task(
             payload,
             run_id=run_id,
         )
-    # Operator intervention — they've looked at the task, so the
+
     # consecutive-failures counter is now stale. Give the next retry
     # a fresh budget. (_clear_failure_counter opens its own write_txn,
     # so it runs after the enclosing one commits.)
@@ -3609,88 +4301,132 @@ def complete_task(
     else:
         verified_cards = []
 
+    workflow_handled = False
+    workflow_final_done = False
+    run_id: Optional[int] = None
     with write_txn(conn):
-        if expected_run_id is None:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'done',
-                       result       = ?,
-                       completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                """,
-                (result, now, task_id),
-            )
-        else:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'done',
-                       result       = ?,
-                       completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                   AND current_run_id = ?
-                """,
-                (result, now, task_id, int(expected_run_id)),
-            )
-        if cur.rowcount != 1:
-            return False
-        run_id = _end_run(
-            conn, task_id,
-            outcome="completed", status="done",
-            summary=summary if summary is not None else result,
-            metadata=metadata,
-        )
-        # If complete_task was called on a never-claimed task (ready or
-        # blocked → done with no run in flight), synthesize a
-        # zero-duration run so the handoff fields are persisted in
-        # attempt history instead of silently lost.
-        if run_id is None and (summary or metadata or result):
-            run_id = _synthesize_ended_run(
+        wf_row = conn.execute(
+            "SELECT workflow_route, current_step_key, current_run_id, status FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if wf_row and wf_row["workflow_route"] and wf_row["current_step_key"]:
+            if expected_run_id is not None and int(wf_row["current_run_id"] or 0) != int(expected_run_id):
+                return False
+            route = normalize_workflow_route(wf_row["workflow_route"])
+            if route:
+                run_id = _end_run(
+                    conn, task_id,
+                    outcome="completed", status="done",
+                    summary=summary if summary is not None else result,
+                    metadata=metadata,
+                )
+                if run_id is None and (summary or metadata or result):
+                    run_id = _synthesize_ended_run(
+                        conn, task_id,
+                        outcome="completed",
+                        summary=summary if summary is not None else result,
+                        metadata=metadata,
+                    )
+                conn.execute(
+                    "UPDATE tasks SET claim_lock = NULL, claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+                    (task_id,),
+                )
+                workflow_final_done = _workflow_complete_step_locked(
+                    conn,
+                    task_id,
+                    route=route,
+                    step_id=wf_row["current_step_key"],
+                    run_id=run_id,
+                    summary=summary,
+                    result=result,
+                    metadata=metadata,
+                    verified_cards=verified_cards,
+                    now=now,
+                )
+                workflow_handled = True
+        if not workflow_handled:
+            if expected_run_id is None:
+                cur = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status       = 'done',
+                           result       = ?,
+                           completed_at = ?,
+                           claim_lock   = NULL,
+                           claim_expires= NULL,
+                           worker_pid   = NULL
+                     WHERE id = ?
+                       AND status IN ('running', 'ready', 'blocked')
+                    """,
+                    (result, now, task_id),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status       = 'done',
+                           result       = ?,
+                           completed_at = ?,
+                           claim_lock   = NULL,
+                           claim_expires= NULL,
+                           worker_pid   = NULL
+                     WHERE id = ?
+                       AND status IN ('running', 'ready', 'blocked')
+                       AND current_run_id = ?
+                    """,
+                    (result, now, task_id, int(expected_run_id)),
+                )
+            if cur.rowcount != 1:
+                return False
+            run_id = _end_run(
                 conn, task_id,
-                outcome="completed",
+                outcome="completed", status="done",
                 summary=summary if summary is not None else result,
                 metadata=metadata,
             )
-        # Carry the handoff summary in the event payload so gateway
-        # notifiers and dashboard WS consumers can render it without a
-        # second SQL round-trip. First line only, 400 char cap — the
-        # full summary stays on the run row.
-        ev_summary = (summary if summary is not None else result) or ""
-        ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
-        completed_payload: dict = {
-            "result_len": len(result) if result else 0,
-            "summary": ev_summary or None,
-        }
-        if verified_cards:
-            completed_payload["verified_cards"] = verified_cards
-        # Carry artifact paths in the event payload so the gateway
-        # notifier can upload them as native attachments alongside the
-        # completion message. Workers pass these via
-        # ``kanban_complete(artifacts=[...])`` which stashes the list in
-        # ``metadata["artifacts"]`` — we promote it onto the event so
-        # consumers don't have to fetch the run row to find it.
-        if isinstance(metadata, dict):
-            md_artifacts = metadata.get("artifacts")
-            if isinstance(md_artifacts, (list, tuple)):
-                cleaned_artifacts = [
-                    str(p).strip() for p in md_artifacts if isinstance(p, str) and str(p).strip()
-                ]
-                if cleaned_artifacts:
-                    completed_payload["artifacts"] = cleaned_artifacts
-        _append_event(
-            conn, task_id, "completed",
-            completed_payload,
-            run_id=run_id,
-        )
+            # If complete_task was called on a never-claimed task (ready or
+            # blocked → done with no run in flight), synthesize a
+            # zero-duration run so the handoff fields are persisted in
+            # attempt history instead of silently lost.
+            if run_id is None and (summary or metadata or result):
+                run_id = _synthesize_ended_run(
+                    conn, task_id,
+                    outcome="completed",
+                    summary=summary if summary is not None else result,
+                    metadata=metadata,
+                )
+            # Carry the handoff summary in the event payload so gateway
+            # notifiers and dashboard WS consumers can render it without a
+            # second SQL round-trip. First line only, 400 char cap — the
+            # full summary stays on the run row.
+            ev_summary = (summary if summary is not None else result) or ""
+            ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
+            completed_payload: dict = {
+                "result_len": len(result) if result else 0,
+                "summary": ev_summary or None,
+            }
+            if verified_cards:
+                completed_payload["verified_cards"] = verified_cards
+            # Carry artifact paths in the event payload so the gateway
+            # notifier can upload them as native attachments alongside the
+            # completion message. Workers pass these via
+            # ``kanban_complete(artifacts=[...])`` which stashes the list in
+            # ``metadata["artifacts"]`` — we promote it onto the event so
+            # consumers don't have to fetch the run row to find it.
+            if isinstance(metadata, dict):
+                md_artifacts = metadata.get("artifacts")
+                if isinstance(md_artifacts, (list, tuple)):
+                    cleaned_artifacts = [
+                        str(p).strip() for p in md_artifacts if isinstance(p, str) and str(p).strip()
+                    ]
+                    if cleaned_artifacts:
+                        completed_payload["artifacts"] = cleaned_artifacts
+            _append_event(
+                conn, task_id, "completed",
+                completed_payload,
+                run_id=run_id,
+            )
+
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
@@ -3719,8 +4455,11 @@ def complete_task(
     _clear_failure_counter(conn, task_id)
     # Recompute ready status for dependents (separate txn so children see done).
     recompute_ready(conn)
-    # Clean up the scratch workspace and any stale tmux session for the worker.
-    _cleanup_workspace(conn, task_id)
+    # Clean up scratch workspace only after legacy completion or the final
+    # workflow step. Intermediate workflow steps must keep their workspace
+    # available for downstream assignees.
+    if not workflow_handled or workflow_final_done:
+        _cleanup_workspace(conn, task_id)
     return True
 
 
@@ -4079,6 +4818,7 @@ def block_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        _workflow_mark_step_blocked_locked(conn, task_id, reason=reason, run_id=run_id)
         return True
 
 
@@ -5359,6 +6099,7 @@ def enforce_max_runtime(
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "sigkill": killed},
+                run_id=run_id,
             )
     return timed_out
 
@@ -5535,8 +6276,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # write_txn so can't nest). ``protocol_violation`` flags the
     # clean-exit-but-still-running case so we can trip the breaker
     # immediately instead of incrementing by 1.
-    crash_details: list[tuple[str, int, str, bool, str]] = []
-    # (task_id, pid, claimer, protocol_violation, error_text)
+    crash_details: list[tuple[str, int, str, bool, str, Optional[int]]] = []
+    # (task_id, pid, claimer, protocol_violation, error_text, run_id)
     with write_txn(conn):
         rows = conn.execute(
             "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
@@ -5649,7 +6390,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     crashed.append(row["id"])
                     crash_details.append(
                         (row["id"], pid, row["claim_lock"],
-                         protocol_violation, error_text)
+                         protocol_violation, error_text, run_id)
                     )
     # Outside the main txn: increment the unified failure counter for
     # each crashed task. If the breaker trips, the task transitions
@@ -5665,10 +6406,10 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     if crash_details:
         # Fingerprint errors to detect systemic failures.
         _fp_counts: dict[str, int] = {}
-        for _, _, _, _, err_text in crash_details:
+        for _, _, _, _, err_text, _run_id in crash_details:
             fp = _error_fingerprint(err_text)
             _fp_counts[fp] = _fp_counts.get(fp, 0) + 1
-        for tid, pid, claimer, protocol_violation, error_text in crash_details:
+        for tid, pid, claimer, protocol_violation, error_text, run_id in crash_details:
             fp = _error_fingerprint(error_text)
             is_systemic = (
                 not protocol_violation
@@ -5682,6 +6423,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer},
+                run_id=run_id,
             )
             if tripped:
                 auto_blocked.append(tid)
@@ -5706,6 +6448,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
+    run_id: Optional[int] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -5746,7 +6489,7 @@ def _record_task_failure(
     blocked = False
     with write_txn(conn):
         row = conn.execute(
-            "SELECT consecutive_failures, status, max_retries "
+            "SELECT consecutive_failures, status, max_retries, workflow_route, current_step_key "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
@@ -5759,7 +6502,19 @@ def _record_task_failure(
         task_override = (
             row["max_retries"] if "max_retries" in row.keys() else None
         )
-        if task_override is not None:
+        step_override = None
+        if row["workflow_route"] and row["current_step_key"]:
+            try:
+                route = normalize_workflow_route(row["workflow_route"])
+                step = _workflow_step(route, row["current_step_key"]) if route else None
+                if step and step.get("max_retries") is not None:
+                    step_override = int(step.get("max_retries"))
+            except Exception:
+                step_override = None
+        if step_override is not None:
+            effective_limit = max(1, int(step_override))
+            limit_source = "workflow_step"
+        elif task_override is not None:
             effective_limit = int(task_override)
             limit_source = "task"
         else:
@@ -5787,7 +6542,6 @@ def _record_task_failure(
                     "WHERE id = ? AND status IN ('ready', 'running')",
                     (failures, error[:500], task_id),
                 )
-            run_id = None
             if end_run:
                 # Only the spawn path has an open run to close.
                 run_id = _end_run(
@@ -5812,6 +6566,9 @@ def _record_task_failure(
                 payload.update(event_payload_extra)
             _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
+            )
+            _workflow_record_failure_locked(
+                conn, task_id, error=error, outcome=outcome, blocked=True, run_id=run_id, now=int(time.time())
             )
             blocked = True
         else:
@@ -5846,6 +6603,9 @@ def _record_task_failure(
                     {"error": error[:500], "failures": failures},
                     run_id=run_id,
                 )
+            _workflow_record_failure_locked(
+                conn, task_id, error=error, outcome=outcome, blocked=False, run_id=run_id, now=int(time.time())
+            )
             # Timeout/crash path's caller already emitted its own event.
     return blocked
 
@@ -6172,7 +6932,7 @@ def dispatch_once(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, workflow_route FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -6231,6 +6991,15 @@ def dispatch_once(
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         row_assignee = row["assignee"]
+        if row["workflow_route"] and not dry_run:
+            next_step = workflow_prepare_next_step(conn, row["id"])
+            if next_step is None:
+                continue
+            refreshed = conn.execute(
+                "SELECT assignee FROM tasks WHERE id = ?",
+                (row["id"],),
+            ).fetchone()
+            row_assignee = refreshed["assignee"] if refreshed else row_assignee
         if not row_assignee:
             # Honour kanban.default_assignee: when the dispatcher hits an
             # unassigned ready task and an operator-configured fallback
@@ -6769,6 +7538,8 @@ def _default_spawn(
     profile_arg = normalize_profile_name(task.assignee)
 
     prompt = f"work kanban task {task.id}"
+    if task.current_step_key:
+        prompt = f"work kanban task {task.id} workflow step {task.current_step_key}"
     env = dict(os.environ)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
@@ -6797,6 +7568,10 @@ def _default_spawn(
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
     if task.current_run_id is not None:
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
+    if task.current_step_key:
+        env["HERMES_KANBAN_WORKFLOW_STEP"] = task.current_step_key
+    if task.workflow_template_id:
+        env["HERMES_KANBAN_WORKFLOW_TEMPLATE"] = task.workflow_template_id
     if task.claim_lock:
         env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
     # Goal-loop mode: the worker reads these and wraps its run in the
@@ -7034,6 +7809,41 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             lines.append(f"Terminal timeout: {effective_terminal_timeout}s")
     if task.branch_name:
         lines.append(f"Branch:   {task.branch_name}")
+    if task.workflow_route:
+        route = task.workflow_route
+        current_id = route.get("current_step_id") or task.current_step_key
+        steps = route.get("steps") or []
+        current_step = next((step for step in steps if step.get("id") == current_id), None)
+        lines.append(f"Workflow: {route.get('template_id') or 'custom'}")
+        lines.append(f"Current workflow step: {current_id or '(none)'}")
+        if current_step:
+            lines.append(
+                f"Step details: {current_step.get('title') or current_step.get('id')} "
+                f"[{current_step.get('type')}, {current_step.get('status')}] "
+                f"assignee=@{current_step.get('assignee') or '(unassigned)'}"
+            )
+            criteria = current_step.get("validation_criteria") or []
+            if criteria:
+                lines.append("Step criteria:")
+                for item in criteria:
+                    lines.append(f"- {item}")
+            evidence = current_step.get("evidence") or []
+            if evidence:
+                lines.append("Recent step evidence:")
+                for item in evidence[-3:]:
+                    if isinstance(item, dict):
+                        text = item.get("text") or item.get("kind") or json.dumps(item, ensure_ascii=False)
+                    else:
+                        text = str(item)
+                    lines.append(f"- {_cap(text, 500)}")
+        if steps:
+            lines.append("Workflow steps:")
+            for step in steps:
+                marker = "*" if step.get("id") == current_id else " "
+                lines.append(
+                    f"{marker} {step.get('id')}: {step.get('status')} "
+                    f"@{step.get('assignee') or '-'} — {step.get('title') or step.get('id')}"
+                )
     lines.append("")
 
     if task.body and task.body.strip():

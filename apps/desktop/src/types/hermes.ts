@@ -78,6 +78,35 @@ export interface KanbanBoardsResponse {
   object: 'list'
 }
 
+export interface KanbanWorkflowEvidence {
+  actor?: null | string
+  kind?: null | string
+  run_id?: null | number
+  text?: null | string
+  timestamp?: null | number
+}
+
+export interface KanbanWorkflowStep {
+  assignee?: null | string
+  depends_on?: string[]
+  evidence?: KanbanWorkflowEvidence[]
+  id: string
+  max_retries?: null | number
+  retry_count?: number
+  status: string
+  title?: null | string
+  type?: null | string
+  validation_criteria?: string[]
+}
+
+export interface KanbanWorkflowRoute {
+  current_step_id?: null | string
+  policy?: Record<string, unknown>
+  steps: KanbanWorkflowStep[]
+  template_id?: null | string
+  version?: number
+}
+
 export interface KanbanTask {
   assignee?: null | string
   body?: null | string
@@ -87,6 +116,7 @@ export interface KanbanTask {
   created_at: number
   created_by?: null | string
   current_run_id?: null | number
+  current_step_key?: null | string
   goal_max_turns?: null | number
   goal_mode: boolean
   id: string
@@ -102,6 +132,9 @@ export interface KanbanTask {
   tenant?: null | string
   title: string
   worker_pid?: null | number
+  workflow_route?: KanbanWorkflowRoute | null
+  workflow_template_id?: null | string
+  workflowRoute?: KanbanWorkflowRoute | null
   workspace_kind: string
   workspace_path?: null | string
 }
@@ -120,6 +153,7 @@ export interface KanbanTaskPayload {
   status?: KanbanStatus
   tenant?: null | string
   title: string
+  workflowRoute?: KanbanWorkflowRoute | null
   workspace_kind?: string
   workspace_path?: null | string
 }
@@ -131,6 +165,7 @@ export interface KanbanTaskUpdatePayload {
   status?: KanbanStatus
   tenant?: null | string
   title?: string
+  workflowRoute?: KanbanWorkflowRoute | null
   workspace_kind?: string
   workspace_path?: null | string
 }

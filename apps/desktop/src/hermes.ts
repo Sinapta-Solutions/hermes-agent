@@ -200,6 +200,34 @@ export function getKanbanTaskDetail(boardSlug: string, taskId: string): Promise<
   })
 }
 
+export function applyKanbanWorkflowPreset(
+  boardSlug: string,
+  taskId: string,
+  body: { assignee?: null | string; preset_id?: string } = {}
+): Promise<KanbanTask> {
+  return window.hermesDesktop
+    .api<KanbanTaskMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/workflow/apply-preset`,
+      method: 'POST',
+      body
+    })
+    .then(result => result.task)
+}
+
+export function createKanbanWorkflowEvidence(
+  boardSlug: string,
+  taskId: string,
+  body: { step_id?: null | string; text: string }
+): Promise<KanbanTask> {
+  return window.hermesDesktop
+    .api<KanbanTaskMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/workflow/evidence`,
+      method: 'POST',
+      body
+    })
+    .then(result => result.task)
+}
+
 export function createKanbanTaskComment(
   boardSlug: string,
   taskId: string,

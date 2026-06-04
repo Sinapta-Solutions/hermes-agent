@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import type { SessionInfo } from '@/types/hermes'
 
-import { $attentionSessionIds, mergeSessionPage, sessionPinId, setSessionAttention } from './session'
+import {
+  $attentionSessionIds,
+  mergeSessionPage,
+  sessionPinId,
+  sessionRefreshKeepIds,
+  setSessionAttention
+} from './session'
 
 const session = (over: Partial<SessionInfo>): SessionInfo => ({
   archived: false,
@@ -60,6 +66,16 @@ describe('sessionPinId', () => {
     // After auto-compression the entry surfaces under a fresh tip id but keeps
     // the original root — pinning on the root keeps the pin stable.
     expect(sessionPinId(session({ id: 'tip', _lineage_root_id: 'root' }))).toBe('root')
+  })
+})
+
+describe('sessionRefreshKeepIds', () => {
+  it('keeps the selected new session even after its working flag clears', () => {
+    expect([...sessionRefreshKeepIds([], [], 'selected')]).toEqual(['selected'])
+  })
+
+  it('combines working, pinned, and selected ids without duplicates', () => {
+    expect([...sessionRefreshKeepIds(['a', 'b'], ['b', 'c'], 'a')]).toEqual(['a', 'b', 'c'])
   })
 })
 
@@ -127,5 +143,15 @@ describe('mergeSessionPage', () => {
     const merged = mergeSessionPage(previous, incoming, ['root'])
 
     expect(merged.map(s => s.id)).toEqual(['tip', 'other'])
+  })
+
+  it('keeps a selected new session when the first refresh omits it', () => {
+    const previous = [session({ id: 'selected', message_count: 0 }), session({ id: 'older' })]
+    const incoming = [session({ id: 'older', message_count: 3 })]
+
+    const keepIds = sessionRefreshKeepIds([], [], 'selected')
+    const merged = mergeSessionPage(previous, incoming, keepIds)
+
+    expect(merged.map(s => s.id)).toEqual(['selected', 'older'])
   })
 })

@@ -36,6 +36,7 @@ import {
   $workingSessionIds,
   mergeSessionPage,
   sessionPinId,
+  sessionRefreshKeepIds,
   setAwaitingResponse,
   setBusy,
   setCurrentBranch,
@@ -210,12 +211,16 @@ export function DesktopController() {
       const result = await listSessions(limit, 1)
 
       if (refreshSessionsRequestRef.current === requestId) {
-        // Don't hard-replace. Two kinds of rows must survive a refresh the
+        // Don't hard-replace. Three kinds of rows must survive a refresh the
         // server didn't return: (1) sessions whose first turn is still in
-        // flight (message_count 0, so min_messages=1 omits them) and (2)
-        // pinned sessions that have aged off the most-recent page — otherwise
-        // the pin "disappears until you refresh". mergeSessionPage keeps both.
-        const keepIds = new Set<string>([...$workingSessionIds.get(), ...$pinnedSessionIds.get()])
+        // flight, (2) the selected session while its first messages settle into
+        // state.db, and (3) pinned sessions that aged off the recent page.
+        const keepIds = sessionRefreshKeepIds(
+          $workingSessionIds.get(),
+          $pinnedSessionIds.get(),
+          $selectedStoredSessionId.get()
+        )
+
         setSessions(prev => mergeSessionPage(prev, result.sessions, keepIds))
         setSessionsTotal(typeof result.total === 'number' ? result.total : result.sessions.length)
       }
@@ -599,7 +604,6 @@ export function DesktopController() {
           />
         </Suspense>
       )}
-
     </>
   )
 

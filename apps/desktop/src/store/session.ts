@@ -27,9 +27,23 @@ function updateAtom<T>(store: AppAtom<T>, next: Updater<T>) {
 export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'id'>): string =>
   session._lineage_root_id ?? session.id
 
+export function sessionRefreshKeepIds(
+  workingSessionIds: readonly string[],
+  pinnedSessionIds: readonly string[],
+  selectedStoredSessionId: null | string
+): Set<string> {
+  const keep = new Set<string>([...workingSessionIds, ...pinnedSessionIds])
+
+  if (selectedStoredSessionId) {
+    keep.add(selectedStoredSessionId)
+  }
+
+  return keep
+}
+
 /** Merge a fresh server session page into the in-memory list, keeping any
  *  row the server omitted that we still want visible — both still-"working"
- *  sessions and pinned sessions.
+ *  sessions, pinned sessions, and the selected session.
  *
  *  Two reasons the server drops a row we must keep:
  *
@@ -44,12 +58,12 @@ export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'id
  *     in-memory list — and because the Pinned section resolves pins against
  *     that list, the pin "disappears until you refresh".
  *
- *  `keepIds` carries both the working set and the pinned set. Pins are stored
- *  on the durable lineage-root id (see {@link sessionPinId}), while the loaded
- *  row surfaces under its live compression tip, so we match a survivor by
- *  either its live `id` or its `_lineage_root_id`. Optimistic deletes/archives
- *  drop the row from `previous` (and unpin it), so a removed session can't be
- *  resurrected here. */
+ *  `keepIds` carries the working set, pinned set, and selected session. Pins
+ *  are stored on the durable lineage-root id (see {@link sessionPinId}), while
+ *  the loaded row surfaces under its live compression tip, so we match a
+ *  survivor by either its live `id` or its `_lineage_root_id`. Optimistic
+ *  deletes/archives drop the row from `previous` (and unpin it), so a removed
+ *  session can't be resurrected here. */
 export function mergeSessionPage(
   previous: SessionInfo[],
   incoming: SessionInfo[],

@@ -519,3 +519,51 @@ def test_run_slash_board_override_does_not_change_boards_show_current(kanban_hom
     out = kc.run_slash("--board beta boards show")
 
     assert "Current board: alpha" in out
+
+
+# ---------------------------------------------------------------------------
+# workflow subcommand
+# ---------------------------------------------------------------------------
+
+def _created_task_id(output: str) -> str:
+    import re
+
+    match = re.search(r"(t_[a-f0-9]+)", output)
+    assert match
+    return match.group(1)
+
+
+def test_run_slash_workflow_apply_preset_show_and_list_active(kanban_home):
+    task_id = _created_task_id(kc.run_slash("create 'workflow cli' --assignee jurishub"))
+
+    applied = kc.run_slash(f"workflow apply-preset {task_id} {kb.JURISHUB_WORKFLOW_PRESET_ID}")
+    assert "current_step=planning" in applied
+
+    shown = json.loads(kc.run_slash(f"workflow show {task_id} --json"))
+    assert shown["workflowRoute"]["template_id"] == kb.JURISHUB_WORKFLOW_PRESET_ID
+    assert shown["workflowRoute"]["steps"][0]["id"] == "planning"
+
+    active = kc.run_slash("workflow list-active")
+    assert task_id in active
+    assert "workflow_step=planning" in active
+
+
+def test_run_slash_workflow_add_update_and_evidence(kanban_home):
+    task_id = _created_task_id(kc.run_slash("create 'custom workflow cli' --assignee base"))
+
+    added = kc.run_slash(
+        f"workflow add-step {task_id} --id qa --title QA --type test --assignee tester --criteria 'pytest passed' --max-retries 2"
+    )
+    assert "Added workflow step qa" in added
+
+    updated = kc.run_slash(f"workflow update-step {task_id} qa --status running --evidence 'started tests'")
+    assert "Updated workflow step qa" in updated
+
+    evidence = kc.run_slash(f"workflow evidence {task_id} qa 'pytest -q passed'")
+    assert "Recorded workflow evidence" in evidence
+
+    shown = json.loads(kc.run_slash(f"workflow show {task_id} --json"))
+    step = shown["workflowRoute"]["steps"][0]
+    assert step["id"] == "qa"
+    assert step["status"] == "running"
+    assert step["evidence"][-1]["text"] == "pytest -q passed"

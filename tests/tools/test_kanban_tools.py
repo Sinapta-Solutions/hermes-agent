@@ -636,8 +636,84 @@ def test_block_rejects_empty_reason(worker_env):
         assert json.loads(out).get("error")
 
 
+def test_workflow_evidence_records_worker_run_id(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        kb.set_workflow_route(
+            conn,
+            worker_env,
+            {
+                "steps": [
+                    {"id": "planning", "title": "Planning", "assignee": "test-worker"},
+                ],
+            },
+        )
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_WORKFLOW_STEP", "planning")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "77")
+
+    out = kt._handle_workflow_evidence({"text": "step handoff"})
+    assert json.loads(out).get("ok") is True
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        evidence = task.workflow_route["steps"][0]["evidence"]
+        assert evidence[-1]["text"] == "step handoff"
+        assert evidence[-1]["run_id"] == 77
+        event = conn.execute(
+            """
+            SELECT run_id, payload
+              FROM task_events
+             WHERE task_id = ? AND kind = 'workflow.step.updated'
+             ORDER BY id DESC LIMIT 1
+            """,
+            (worker_env,),
+        ).fetchone()
+        assert event["run_id"] == 77
+        assert json.loads(event["payload"])["run_id"] == 77
+    finally:
+        conn.close()
+
+
+def test_workflow_evidence_rejects_stale_worker_step(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        kb.set_workflow_route(
+            conn,
+            worker_env,
+            {
+                "steps": [
+                    {"id": "planning", "title": "Planning", "assignee": "test-worker"},
+                    {
+                        "id": "implementation",
+                        "title": "Implementation",
+                        "assignee": "test-worker",
+                        "depends_on": ["planning"],
+                    },
+                ],
+            },
+        )
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_WORKFLOW_STEP", "implementation")
+
+    out = kt._handle_workflow_evidence({"text": "wrong step"})
+    assert "current task step is planning" in json.loads(out).get("error", "")
+
+
 def test_heartbeat_happy_path(worker_env):
     from tools import kanban_tools as kt
+
     out = kt._handle_heartbeat({"note": "progress"})
     d = json.loads(out)
     assert d["ok"] is True

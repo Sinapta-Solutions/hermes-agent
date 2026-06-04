@@ -14,8 +14,10 @@ import {
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import {
+  applyKanbanWorkflowPreset,
   createKanbanTask,
   createKanbanTaskComment,
+  createKanbanWorkflowEvidence,
   getKanbanAssignees,
   getKanbanBoards,
   getKanbanTaskDetail,
@@ -74,6 +76,7 @@ const KANBAN_VISIBLE_CARD_LIMIT = 5
 const KANBAN_COLUMN_SCROLL_MAX_HEIGHT = `calc(${KANBAN_VISIBLE_CARD_LIMIT} * 8.5rem + ${KANBAN_VISIBLE_CARD_LIMIT - 1} * 0.5rem)`
 const KANBAN_FAST_POLL_MS = 3000
 const KANBAN_IDLE_POLL_MS = 10000
+const JURISHUB_WORKFLOW_PRESET_ID = 'jurishub-standard'
 
 interface TimelineItem {
   body?: string
@@ -219,6 +222,35 @@ function formatPayload(value: KanbanEvent['payload'] | Record<string, unknown> |
   }
 }
 
+function workflowRouteForTask(task: KanbanTask | null | undefined) {
+  return task?.workflowRoute ?? task?.workflow_route ?? null
+}
+
+function workflowStepsForTask(task: KanbanTask | null | undefined) {
+  return workflowRouteForTask(task)?.steps ?? []
+}
+
+function workflowCurrentStepForTask(task: KanbanTask | null | undefined) {
+  const route = workflowRouteForTask(task)
+  const steps = route?.steps ?? []
+  const currentId = route?.current_step_id ?? task?.current_step_key ?? null
+
+  return steps.find(step => step.id === currentId) ?? steps.find(step => ['ready', 'running', 'blocked'].includes(step.status)) ?? null
+}
+
+function workflowProgress(task: KanbanTask | null | undefined) {
+  const steps = workflowStepsForTask(task)
+  const passed = steps.filter(step => step.status === 'passed').length
+
+  return { passed, total: steps.length }
+}
+
+function workflowEvidencePreview(step: ReturnType<typeof workflowCurrentStepForTask>) {
+  const last = step?.evidence?.at(-1)
+
+  return last?.text || last?.kind || null
+}
+
 function taskCount(tasks: KanbanTask[], status: KanbanStatus) {
   return tasks.filter(task => task.status === status).length
 }
@@ -243,6 +275,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     () => boards.find(board => board.slug === selectedBoardSlug) ?? boards[0] ?? null,
     [boards, selectedBoardSlug]
   )
+
   const boardTenant = selectedBoard?.slug ? selectedBoard.slug.toLowerCase() : ''
 
   const selectedTask = useMemo(() => tasks.find(task => task.id === selectedTaskId) ?? null, [selectedTaskId, tasks])
@@ -299,6 +332,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     }
 
     const intervalMs = tasks.some(task => task.status === 'running') ? KANBAN_FAST_POLL_MS : KANBAN_IDLE_POLL_MS
+
     const timer = window.setInterval(() => {
       if (pollInFlightRef.current) {
         return
@@ -763,6 +797,9 @@ function TaskDetailDialog({
   const [savingCommentEdit, setSavingCommentEdit] = useState(false)
   const [savingTask, setSavingTask] = useState(false)
   const [archivingTask, setArchivingTask] = useState(false)
+  const [workflowEvidenceBody, setWorkflowEvidenceBody] = useState('')
+  const [savingWorkflowEvidence, setSavingWorkflowEvidence] = useState(false)
+  const [applyingWorkflowPreset, setApplyingWorkflowPreset] = useState(false)
   const activeTaskId = activeTask?.id ?? null
   const timeline = useMemo(() => buildTimeline(detail), [detail])
 
@@ -787,6 +824,7 @@ function TaskDetailDialog({
     setEditingCommentBody('')
     setEditingCommentId(null)
     setExpandedCommentId(null)
+    setWorkflowEvidenceBody('')
     setEditForm({
       assignee: activeTask.assignee ?? '',
       body: activeTask.body ?? '',
@@ -907,6 +945,68 @@ function TaskDetailDialog({
     }
   }
 
+  const applyWorkflowPreset = async () => {
+    if (!boardSlug || !activeTask) {
+      return
+    }
+
+    setApplyingWorkflowPreset(true)
+
+    try {
+      const updated = await applyKanbanWorkflowPreset(boardSlug, activeTask.id, {
+        assignee: activeTask.assignee ?? null,
+        preset_id: JURISHUB_WORKFLOW_PRESET_ID
+      })
+
+      onTaskUpdated(updated)
+      await onRefreshDetail(updated.id)
+      notify({ title: 'Kanban', message: 'Preset JurisHUB aplicado' })
+    } catch (error) {
+      notifyError(error, 'Failed to apply Kanban workflow preset')
+    } finally {
+      setApplyingWorkflowPreset(false)
+    }
+  }
+
+  const addWorkflowEvidence = async () => {
+    if (!boardSlug || !activeTask) {
+      return
+    }
+
+    const body = workflowEvidenceBody.trim()
+    const currentStep = workflowCurrentStepForTask(activeTask)
+
+    if (!body) {
+      notify({ title: 'Kanban', message: 'Evidência vazia' })
+
+      return
+    }
+
+    if (!currentStep) {
+      notify({ title: 'Kanban', message: 'Card sem etapa workflow atual' })
+
+      return
+    }
+
+    setSavingWorkflowEvidence(true)
+
+    try {
+      const updated = await createKanbanWorkflowEvidence(boardSlug, activeTask.id, {
+        step_id: currentStep.id,
+        text: body
+      })
+
+      setWorkflowEvidenceBody('')
+      onTaskUpdated(updated)
+      await onRefreshDetail(updated.id)
+      notify({ title: 'Kanban', message: `Evidência registrada em ${currentStep.id}` })
+    } catch (error) {
+      notifyError(error, 'Failed to record Kanban workflow evidence')
+    } finally {
+      setSavingWorkflowEvidence(false)
+    }
+  }
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="flex h-[min(92vh,58rem)] max-h-[92vh] max-w-6xl flex-col overflow-hidden border-(--ui-stroke-secondary) bg-(--ui-chat-bubble-background) p-0 text-(--ui-text-primary)">
@@ -1018,6 +1118,16 @@ function TaskDetailDialog({
                 <Meta label="Branch" value={activeTask.branch_name || '—'} />
                 <Meta label="Run" value={activeTask.current_run_id ? String(activeTask.current_run_id) : '—'} />
               </div>
+
+              <WorkflowRoutePanel
+                applyingPreset={applyingWorkflowPreset}
+                evidenceBody={workflowEvidenceBody}
+                onApplyPreset={() => void applyWorkflowPreset()}
+                onEvidenceBodyChange={setWorkflowEvidenceBody}
+                onRecordEvidence={() => void addWorkflowEvidence()}
+                savingEvidence={savingWorkflowEvidence}
+                task={activeTask}
+              />
 
               <AccordionBlock defaultOpen title={`Atividade recente (${timeline.length})`}>
                 <div className="space-y-2">
@@ -1143,6 +1253,130 @@ function TaskDetailDialog({
   )
 }
 
+function WorkflowRoutePanel({
+  applyingPreset,
+  evidenceBody,
+  onApplyPreset,
+  onEvidenceBodyChange,
+  onRecordEvidence,
+  savingEvidence,
+  task
+}: {
+  applyingPreset: boolean
+  evidenceBody: string
+  onApplyPreset: () => void
+  onEvidenceBodyChange: (value: string) => void
+  onRecordEvidence: () => void
+  savingEvidence: boolean
+  task: KanbanTask
+}) {
+  const route = workflowRouteForTask(task)
+  const currentStep = workflowCurrentStepForTask(task)
+  const progress = workflowProgress(task)
+
+  if (!route) {
+    return (
+      <section className="rounded-xl border border-dashed border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">WorkflowRoute</div>
+            <div className="mt-1 text-xs text-(--ui-text-tertiary)">Card legado: sem rota multi-agente.</div>
+          </div>
+          <Button disabled={applyingPreset} onClick={onApplyPreset} size="sm" type="button">
+            {applyingPreset ? 'Aplicando…' : 'Aplicar preset JurisHUB'}
+          </Button>
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">WorkflowRoute</div>
+          <div className="mt-1 text-xs text-(--ui-text-tertiary)">
+            {route.template_id || 'custom'} · etapa atual {currentStep?.id ?? '—'} · {progress.passed}/{progress.total} concluídas
+          </div>
+        </div>
+        <span className="rounded-full border border-(--ui-stroke-secondary) px-2 py-0.5 text-xs text-(--ui-cyan)">
+          v{route.version ?? 1}
+        </span>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {route.steps.map(step => {
+          const active = step.id === currentStep?.id
+          const evidence = step.evidence ?? []
+
+          return (
+            <div
+              className={cn(
+                'rounded-lg border bg-(--ui-bg-chrome) p-3 text-xs',
+                active ? 'border-(--ui-accent)' : 'border-(--ui-stroke-secondary)',
+                step.status === 'blocked' && 'border-(--ui-red)'
+              )}
+              key={step.id}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 text-(--ui-text-primary)">
+                <span>
+                  {active ? '● ' : ''}{step.id} · {step.title || step.id}
+                </span>
+                <span className="rounded bg-(--ui-bg-secondary) px-1.5 py-0.5 text-(--ui-text-tertiary)">
+                  {step.status} · @{step.assignee || '—'}
+                </span>
+              </div>
+              <div className="mt-1 text-(--ui-text-tertiary)">
+                tipo {step.type || 'custom'} · retry {step.retry_count ?? 0}/{step.max_retries ?? '∞'}
+              </div>
+              {!!step.depends_on?.length && (
+                <div className="mt-1 text-(--ui-text-quaternary)">depende de: {step.depends_on.join(', ')}</div>
+              )}
+              {!!step.validation_criteria?.length && (
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-(--ui-text-secondary)">
+                  {step.validation_criteria.map((criterion, index) => (
+                    <li key={`${step.id}-criterion-${index}`}>{criterion}</li>
+                  ))}
+                </ul>
+              )}
+              {!!evidence.length && (
+                <div className="mt-2 rounded bg-(--ui-bg-secondary) p-2 text-(--ui-text-tertiary)">
+                  <div className="mb-1 text-[0.65rem] uppercase tracking-[0.14em] text-(--ui-text-quaternary)">
+                    Evidência recente
+                  </div>
+                  {evidence.slice(-3).map((item, index) => (
+                    <div className="mt-1 whitespace-pre-wrap break-words" key={`${step.id}-evidence-${index}`}>
+                      {item.text || item.kind || JSON.stringify(item)}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="mt-3 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3">
+        <div className="mb-2 text-xs font-medium text-(--ui-text-secondary)">
+          Registrar evidência na etapa atual {currentStep?.id ? `(${currentStep.id})` : ''}
+        </div>
+        <Textarea
+          className="min-h-20 border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
+          disabled={!currentStep}
+          onChange={event => onEvidenceBodyChange(event.target.value)}
+          placeholder="Comando, resultado, blocker ou decisão da etapa…"
+          value={evidenceBody}
+        />
+        <div className="mt-2 flex justify-end">
+          <Button disabled={!currentStep || savingEvidence} onClick={onRecordEvidence} size="sm" type="button">
+            {savingEvidence ? 'Registrando…' : 'Registrar evidência'}
+          </Button>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function TaskCard({
   active,
   dragging,
@@ -1163,6 +1397,9 @@ function TaskCard({
   task: KanbanTask
 }) {
   const signal = latestTaskSignal(task, nowSeconds)
+  const currentStep = workflowCurrentStepForTask(task)
+  const workflow = workflowProgress(task)
+  const evidence = workflowEvidencePreview(currentStep)
 
   return (
     <div
@@ -1200,6 +1437,16 @@ function TaskCard({
       )}
       <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[0.68rem] text-(--ui-text-tertiary)">
         <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5">{task.assignee || 'unassigned'}</span>
+        {workflow.total > 0 && (
+          <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5 text-(--ui-cyan)">
+            wf {currentStep?.id ?? '—'} {workflow.passed}/{workflow.total}
+          </span>
+        )}
+        {evidence && (
+          <span className="line-clamp-1 max-w-36 rounded bg-(--ui-bg-primary) px-1.5 py-0.5 text-(--ui-text-tertiary)">
+            ev: {evidence}
+          </span>
+        )}
         {task.tenant && <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5">{task.tenant}</span>}
         {task.current_run_id && (
           <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5 text-(--ui-cyan)">

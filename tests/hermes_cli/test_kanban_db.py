@@ -4414,3 +4414,143 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRoute
+# ---------------------------------------------------------------------------
+
+def _workflow_route(max_retries=2):
+    return {
+        "version": kb.WORKFLOW_ROUTE_VERSION,
+        "template_id": "test-route",
+        "steps": [
+            {
+                "id": "planning",
+                "title": "Planning",
+                "type": "planning",
+                "assignee": "planner",
+                "status": "pending",
+                "validation_criteria": ["plan accepted"],
+                "max_retries": max_retries,
+            },
+            {
+                "id": "implementation",
+                "title": "Implementation",
+                "type": "implementation",
+                "assignee": "coder",
+                "depends_on": ["planning"],
+                "status": "pending",
+                "validation_criteria": ["code changed"],
+                "max_retries": max_retries,
+            },
+        ],
+    }
+
+
+def test_workflow_route_schema_and_persistence(kanban_home):
+    with kb.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+        assert {"workflow_route", "workflow_template_id", "current_step_key"} <= columns
+        tid = kb.create_task(conn, title="workflow card", assignee="fallback", workflow_route=_workflow_route())
+        task = kb.get_task(conn, tid)
+        assert task.workflow_route["current_step_id"] == "planning"
+        assert task.current_step_key == "planning"
+        assert task.workflow_template_id == "test-route"
+        assert task.assignee == "planner"
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.workflow_route["steps"][0]["status"] == "ready"
+        assert task.workflow_route["steps"][1]["status"] == "pending"
+
+
+def test_normalize_workflow_route_sets_defaults_and_ready_step(kanban_home):
+    route = kb.normalize_workflow_route({"steps": [{"id": "audit", "type": "audit", "assignee": "auditor"}]})
+
+    assert route["version"] == kb.WORKFLOW_ROUTE_VERSION
+    assert route["current_step_id"] == "audit"
+    assert route["steps"][0]["title"] == "audit"
+    assert route["steps"][0]["status"] == "ready"
+    assert route["steps"][0]["retry_count"] == 0
+
+
+def test_workflow_claim_and_complete_advances_steps_then_finishes_card(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="workflow card", assignee="fallback", workflow_route=_workflow_route())
+
+        claimed = kb.claim_task(conn, tid, claimer="test")
+        assert claimed is not None
+        assert claimed.workflow_route["steps"][0]["status"] == "running"
+        assert claimed.current_step_key == "planning"
+
+        assert kb.complete_task(conn, tid, summary="plan done")
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.current_step_key == "implementation"
+        assert task.assignee == "coder"
+        assert task.workflow_route["steps"][0]["status"] == "passed"
+        assert task.workflow_route["steps"][1]["status"] == "ready"
+
+        assert kb.claim_task(conn, tid, claimer="test") is not None
+        assert kb.complete_task(conn, tid, summary="implementation done")
+        task = kb.get_task(conn, tid)
+        assert task.status == "done"
+        assert task.current_step_key is None
+        assert kb.workflow_is_complete(task.workflow_route)
+
+
+def test_jurishub_workflow_preset_sets_expected_steps(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="jurishub flow", assignee="juris-agent")
+        route = kb.workflow_apply_preset(conn, tid, kb.JURISHUB_WORKFLOW_PRESET_ID)
+        task = kb.get_task(conn, tid)
+
+    assert route["template_id"] == kb.JURISHUB_WORKFLOW_PRESET_ID
+    assert [step["id"] for step in route["steps"]] == [
+        "planning",
+        "implementation",
+        "review",
+        "audit",
+        "tests",
+        "docs",
+        "handoff",
+    ]
+    assert task.current_step_key == "planning"
+    assert task.assignee == "juris-agent"
+
+
+def test_workflow_spawn_failure_retries_then_blocks_current_step(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="retry flow", assignee="fallback", workflow_route=_workflow_route(max_retries=2))
+        assert kb.claim_task(conn, tid, claimer="first") is not None
+
+        blocked = kb._record_spawn_failure(conn, tid, "spawn failed once", failure_limit=99)
+        task = kb.get_task(conn, tid)
+        step = task.workflow_route["steps"][0]
+        assert blocked is False
+        assert task.status == "ready"
+        assert step["status"] == "ready"
+        assert step["retry_count"] == 1
+
+        assert kb.claim_task(conn, tid, claimer="second") is not None
+        blocked = kb._record_spawn_failure(conn, tid, "spawn failed twice", failure_limit=99)
+        task = kb.get_task(conn, tid)
+        step = task.workflow_route["steps"][0]
+        assert blocked is True
+        assert task.status == "blocked"
+        assert step["status"] == "blocked"
+        assert step["retry_count"] == 2
+
+
+def test_workflow_block_task_blocks_current_step(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="blocked flow", assignee="fallback", workflow_route=_workflow_route())
+        assert kb.claim_task(conn, tid, claimer="blocker") is not None
+        assert kb.block_task(conn, tid, reason="need human")
+        task = kb.get_task(conn, tid)
+
+    assert task.status == "blocked"
+    assert task.workflow_route["current_step_id"] == "planning"
+    assert task.workflow_route["steps"][0]["status"] == "blocked"
+    assert task.workflow_route["steps"][0]["evidence"][-1]["kind"] == "blocked"

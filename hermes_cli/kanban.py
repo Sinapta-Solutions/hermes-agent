@@ -78,6 +78,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
+        "workflow_route": t.workflow_route,
     }
 
 
@@ -834,6 +835,50 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Emit one JSON object per task on stdout",
     )
 
+    # --- workflow ---
+    p_workflow = sub.add_parser(
+        "workflow",
+        help="Inspect and mutate per-card workflowRoute steps",
+    )
+    workflow_sub = p_workflow.add_subparsers(dest="workflow_action")
+
+    wf_show = workflow_sub.add_parser("show", help="Show a task workflow route")
+    wf_show.add_argument("task_id")
+    wf_show.add_argument("--json", action="store_true")
+
+    wf_preset = workflow_sub.add_parser(
+        "apply-preset",
+        help="Apply a built-in workflow preset to a task",
+    )
+    wf_preset.add_argument("task_id")
+    wf_preset.add_argument("preset_id", choices=[kb.JURISHUB_WORKFLOW_PRESET_ID])
+    wf_preset.add_argument("--assignee", default=None, metavar="PROFILE")
+
+    wf_add = workflow_sub.add_parser("add-step", help="Add a workflow step")
+    wf_add.add_argument("task_id")
+    wf_add.add_argument("--id", required=True, dest="step_id", metavar="STEP")
+    wf_add.add_argument("--title", required=True)
+    wf_add.add_argument("--type", required=True, choices=sorted(kb.VALID_WORKFLOW_STEP_TYPES), dest="step_type")
+    wf_add.add_argument("--assignee", required=True, metavar="PROFILE")
+    wf_add.add_argument("--depends-on", action="append", default=[], metavar="STEP")
+    wf_add.add_argument("--criteria", action="append", default=[], metavar="TEXT")
+    wf_add.add_argument("--max-retries", type=int, default=None, metavar="N")
+
+    wf_update = workflow_sub.add_parser("update-step", help="Update a workflow step")
+    wf_update.add_argument("task_id")
+    wf_update.add_argument("step_id")
+    wf_update.add_argument("--status", choices=sorted(kb.VALID_WORKFLOW_STEP_STATUSES), default=None)
+    wf_update.add_argument("--assignee", default=None, metavar="PROFILE")
+    wf_update.add_argument("--evidence", default=None, metavar="TEXT")
+
+    wf_evidence = workflow_sub.add_parser("evidence", help="Append evidence to a workflow step")
+    wf_evidence.add_argument("task_id")
+    wf_evidence.add_argument("step_id")
+    wf_evidence.add_argument("text", nargs="+")
+
+    wf_active = workflow_sub.add_parser("list-active", help="List active workflow tasks")
+    wf_active.add_argument("--json", action="store_true")
+
     # --- gc ---
     p_gc = sub.add_parser(
         "gc", help="Garbage-collect archived-task workspaces, old events, and old logs",
@@ -967,6 +1012,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "context":  _cmd_context,
         "specify":  _cmd_specify,
         "decompose":  _cmd_decompose,
+        "workflow": _cmd_workflow,
         "gc":       _cmd_gc,
     }
     handler = handlers.get(action)
@@ -2697,6 +2743,161 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
     return 0 if (ok_count > 0 or not ids) else 1
 
 
+def _workflow_current_step(route: Optional[dict]) -> Optional[dict]:
+    if not route:
+        return None
+    current_id = route.get("current_step_id")
+    for step in route.get("steps") or []:
+        if step.get("id") == current_id:
+            return step
+    return None
+
+
+def _workflow_step_line(step: dict, *, current_id: Optional[str]) -> str:
+    marker = "*" if step.get("id") == current_id else " "
+    assignee = step.get("assignee") or "-"
+    return (
+        f"  {marker} {step.get('id')}  {step.get('status')}  "
+        f"{step.get('type')}  @{assignee}  {step.get('title') or step.get('id')}"
+    )
+
+
+def _print_workflow_route(task_id: str, route: Optional[dict]) -> None:
+    if not route:
+        print(f"Task {task_id} has no workflowRoute")
+        return
+    current_id = route.get("current_step_id")
+    template = route.get("template_id") or "custom"
+    print(f"Workflow {task_id}: template={template} current={current_id or '-'}")
+    for step in route.get("steps") or []:
+        print(_workflow_step_line(step, current_id=current_id))
+        depends = step.get("depends_on") or []
+        if depends:
+            print(f"      depends_on: {', '.join(depends)}")
+        criteria = step.get("validation_criteria") or []
+        if criteria:
+            print(f"      criteria: {' | '.join(str(item) for item in criteria)}")
+        evidence = step.get("evidence") or []
+        if evidence:
+            last = evidence[-1]
+            if isinstance(last, dict):
+                text = last.get("text") or last.get("kind") or "evidence"
+            else:
+                text = str(last)
+            print(f"      last_evidence: {str(text)[:160]}")
+
+
+def _cmd_workflow(args: argparse.Namespace) -> int:
+    action = getattr(args, "workflow_action", None)
+    if not action:
+        print("kanban workflow: expected show, apply-preset, add-step, update-step, evidence, or list-active", file=sys.stderr)
+        return 2
+
+    if action == "list-active":
+        with kb.connect_closing() as conn:
+            tasks = kb.workflow_active_tasks(conn)
+        if getattr(args, "json", False):
+            print(json.dumps([_task_to_dict(task) for task in tasks], indent=2, ensure_ascii=False))
+            return 0
+        if not tasks:
+            print("(no active workflow tasks)")
+            return 0
+        for task in tasks:
+            current = _workflow_current_step(task.workflow_route)
+            step_label = current.get("id") if current else (task.current_step_key or "-")
+            print(f"{_fmt_task_line(task)}  workflow_step={step_label}")
+        return 0
+
+    task_id = getattr(args, "task_id", None)
+    if not task_id:
+        print("kanban workflow: task_id is required", file=sys.stderr)
+        return 2
+
+    with kb.connect_closing() as conn:
+        if action == "show":
+            task = kb.get_task(conn, task_id)
+            if task is None:
+                print(f"no such task: {task_id}", file=sys.stderr)
+                return 1
+            route = task.workflow_route
+            if getattr(args, "json", False):
+                print(json.dumps({"task_id": task_id, "workflowRoute": route}, indent=2, ensure_ascii=False))
+            else:
+                _print_workflow_route(task_id, route)
+            return 0
+
+        if action == "apply-preset":
+            route = kb.workflow_apply_preset(
+                conn,
+                task_id,
+                args.preset_id,
+                assignee=getattr(args, "assignee", None),
+                actor=_profile_author(),
+            )
+            current = _workflow_current_step(route)
+            print(
+                f"Applied {args.preset_id} to {task_id}; "
+                f"current_step={current.get('id') if current else '-'}"
+            )
+            return 0
+
+        if action == "add-step":
+            max_retries = getattr(args, "max_retries", None)
+            if max_retries is not None and max_retries < 0:
+                print("kanban workflow add-step: --max-retries must be >= 0", file=sys.stderr)
+                return 2
+            route = kb.add_workflow_step(
+                conn,
+                task_id,
+                step_id=args.step_id,
+                title=args.title,
+                step_type=args.step_type,
+                assignee=args.assignee,
+                depends_on=tuple(getattr(args, "depends_on", []) or ()),
+                validation_criteria=tuple(getattr(args, "criteria", []) or ()),
+                max_retries=max_retries,
+                actor=_profile_author(),
+            )
+            current = _workflow_current_step(route)
+            print(f"Added workflow step {args.step_id} to {task_id}; current_step={current.get('id') if current else '-'}")
+            return 0
+
+        if action == "update-step":
+            if not (getattr(args, "status", None) or getattr(args, "assignee", None) is not None or getattr(args, "evidence", None)):
+                print("kanban workflow update-step: pass --status, --assignee, or --evidence", file=sys.stderr)
+                return 2
+            route = kb.update_workflow_step(
+                conn,
+                task_id,
+                args.step_id,
+                status=getattr(args, "status", None),
+                evidence=getattr(args, "evidence", None),
+                assignee=getattr(args, "assignee", None),
+                actor=_profile_author(),
+            )
+            current = _workflow_current_step(route)
+            print(f"Updated workflow step {args.step_id} on {task_id}; current_step={current.get('id') if current else '-'}")
+            return 0
+
+        if action == "evidence":
+            text = " ".join(getattr(args, "text", []) or ()).strip()
+            if not text:
+                print("kanban workflow evidence: TEXT is required", file=sys.stderr)
+                return 2
+            kb.record_workflow_evidence(
+                conn,
+                task_id,
+                args.step_id,
+                text,
+                actor=_profile_author(),
+            )
+            print(f"Recorded workflow evidence for {task_id}:{args.step_id}")
+            return 0
+
+    print(f"kanban workflow: unknown action {action!r}", file=sys.stderr)
+    return 2
+
+
 def _cmd_gc(args: argparse.Namespace) -> int:
     """Remove scratch workspaces of archived tasks, prune old events, and
     delete old worker logs."""
@@ -2757,6 +2958,7 @@ Common subcommands:
   `boards list`         Show all boards
   `assignees`           Known profiles + counts
   `context <id>`        Full worker-context dump
+  `workflow show <id>`  Show per-card workflowRoute
   `runs <id>`           Attempt history
   `log <id>`            Worker log
 

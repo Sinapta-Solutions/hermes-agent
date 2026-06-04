@@ -61,3 +61,58 @@ def test_desktop_kanban_archive_hides_task_from_active_board(tmp_path, monkeypat
     detail = client.get(f"/api/kanban/boards/jur/tasks/{task_id}", headers=headers)
     assert detail.status_code == 200
     assert detail.json()["task"]["status"] == "archived"
+
+
+
+def test_desktop_kanban_workflow_route_create_apply_preset_and_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="wf")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    route = {
+        "version": kanban_db.WORKFLOW_ROUTE_VERSION,
+        "template_id": "desktop-custom",
+        "steps": [
+            {"id": "plan", "title": "Plan", "type": "planning", "assignee": "planner"},
+            {"id": "ship", "title": "Ship", "type": "implementation", "assignee": "shipper", "depends_on": ["plan"]},
+        ],
+    }
+
+    created = client.post(
+        "/api/kanban/boards/wf/tasks",
+        headers=headers,
+        json={"title": "workflow api", "assignee": "fallback", "workflowRoute": route},
+    )
+    assert created.status_code == 201
+    task = created.json()["task"]
+    task_id = task["id"]
+    assert task["workflowRoute"]["template_id"] == "desktop-custom"
+    assert task["current_step_key"] == "plan"
+    assert task["assignee"] == "planner"
+
+    preset = client.post(
+        f"/api/kanban/boards/wf/tasks/{task_id}/workflow/apply-preset",
+        headers=headers,
+        json={"preset_id": kanban_db.JURISHUB_WORKFLOW_PRESET_ID, "assignee": "juris-agent"},
+    )
+    assert preset.status_code == 200
+    task = preset.json()["task"]
+    assert task["workflowRoute"]["template_id"] == kanban_db.JURISHUB_WORKFLOW_PRESET_ID
+    assert task["current_step_key"] == "planning"
+    assert task["assignee"] == "juris-agent"
+
+    evidence = client.post(
+        f"/api/kanban/boards/wf/tasks/{task_id}/workflow/evidence",
+        headers=headers,
+        json={"text": "desktop evidence"},
+    )
+    assert evidence.status_code == 200
+
+    detail = client.get(f"/api/kanban/boards/wf/tasks/{task_id}", headers=headers)
+    assert detail.status_code == 200
+    step = detail.json()["task"]["workflowRoute"]["steps"][0]
+    assert step["id"] == "planning"
+    assert step["evidence"][-1]["text"] == "desktop evidence"

@@ -115,6 +115,15 @@ def _worker_run_id(task_id: str) -> Optional[int]:
         return None
 
 
+def _worker_workflow_step_id(task_id: str) -> Optional[str]:
+    """Return the workflow step id pinned by the dispatcher for this worker."""
+    if os.environ.get("HERMES_KANBAN_TASK") != task_id:
+        return None
+    raw = os.environ.get("HERMES_KANBAN_WORKFLOW_STEP")
+    text = str(raw or "").strip()
+    return text or None
+
+
 def _stamp_worker_session_metadata(
     task_id: str, metadata: Optional[dict]
 ) -> Optional[dict]:
@@ -379,6 +388,9 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "completed_at": task.completed_at,
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
+        "workflow_template_id": task.workflow_template_id,
+        "current_step_key": task.current_step_key,
+        "workflow_route": task.workflow_route,
         "parents": parents,
         "children": children,
         "parent_count": len(parents),
@@ -424,6 +436,9 @@ def _handle_show(args: dict, **kw) -> str:
                     "result": t.result,
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
+                    "workflow_template_id": t.workflow_template_id,
+                    "current_step_key": t.current_step_key,
+                    "workflow_route": t.workflow_route,
                 }
 
             def _run_dict(r):
@@ -736,6 +751,58 @@ def _handle_heartbeat(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_heartbeat failed")
         return tool_error(f"kanban_heartbeat: {e}")
+
+
+def _handle_workflow_evidence(args: dict, **kw) -> str:
+    """Append evidence to the current workflow step without changing status."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    text = args.get("text")
+    if not text or not str(text).strip():
+        return tool_error("text is required")
+    requested_step = str(args.get("step_id") or "").strip() or None
+    worker_step = _worker_workflow_step_id(tid)
+    if worker_step and requested_step and requested_step != worker_step:
+        return tool_error(
+            f"worker is scoped to workflow step {worker_step}; refusing "
+            f"to record evidence on {requested_step}"
+        )
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            task = kb.get_task(conn, tid)
+            if task is None:
+                return tool_error(f"task {tid} not found")
+            if worker_step and task.current_step_key and worker_step != task.current_step_key:
+                return tool_error(
+                    f"worker is scoped to workflow step {worker_step}; current task step is {task.current_step_key}"
+                )
+            step_id = requested_step or worker_step or task.current_step_key
+            if not step_id:
+                return tool_error(f"task {tid} has no current workflow step")
+            kb.record_workflow_evidence(
+                conn,
+                tid,
+                step_id,
+                str(text).strip(),
+                actor=os.environ.get("HERMES_PROFILE") or "worker",
+                run_id=_worker_run_id(tid),
+            )
+            return _ok(task_id=tid, step_id=step_id)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_workflow_evidence: {e}")
+    except Exception as e:
+        logger.exception("kanban_workflow_evidence failed")
+        return tool_error(f"kanban_workflow_evidence: {e}")
 
 
 def _handle_comment(args: dict, **kw) -> str:
@@ -1181,6 +1248,38 @@ KANBAN_HEARTBEAT_SCHEMA = {
     },
 }
 
+KANBAN_WORKFLOW_EVIDENCE_SCHEMA = {
+    "name": "kanban_workflow_evidence",
+    "description": (
+        "Append progress/evidence to the current workflowRoute step. "
+        "Dispatcher-spawned workers are pinned to their own task and step; "
+        "foreign task or step evidence is refused."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "step_id": {
+                "type": "string",
+                "description": (
+                    "Workflow step id. Optional for workers; defaults to "
+                    "HERMES_KANBAN_WORKFLOW_STEP / task.current_step_key."
+                ),
+            },
+            "text": {
+                "type": "string",
+                "description": "Evidence/progress text to attach to the current step.",
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["text"],
+    },
+}
+
+
 KANBAN_COMMENT_SCHEMA = {
     "name": "kanban_comment",
     "description": (
@@ -1446,6 +1545,15 @@ registry.register(
     handler=_handle_heartbeat,
     check_fn=_check_kanban_mode,
     emoji="💓",
+)
+
+registry.register(
+    name="kanban_workflow_evidence",
+    toolset="kanban",
+    schema=KANBAN_WORKFLOW_EVIDENCE_SCHEMA,
+    handler=_handle_workflow_evidence,
+    check_fn=_check_kanban_mode,
+    emoji="🧭",
 )
 
 registry.register(

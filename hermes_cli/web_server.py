@@ -1995,16 +1995,34 @@ def _read_board_meta(slug: str) -> Optional[Dict[str, Any]]:
 
 
 def _connect_kanban_board(slug: str) -> sqlite3.Connection:
+    slug = _safe_board_slug(slug)
     db_path = _board_db_path(slug)
     if not db_path.exists():
         raise HTTPException(status_code=404, detail=f"Kanban board not found: {slug}")
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    from hermes_cli import kanban_db
+
+    return kanban_db.connect(board=slug)
+
+
+def _row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+    return row[key] if key in row.keys() else default
+
+
+def _parse_workflow_route_payload(body: Dict[str, Any]) -> tuple[bool, Any]:
+    if "workflowRoute" in body:
+        return True, body.get("workflowRoute")
+    if "workflow_route" in body:
+        return True, body.get("workflow_route")
+    return False, None
 
 
 def _task_response(row: sqlite3.Row) -> Dict[str, Any]:
+    workflow_route = _row_value(row, "workflow_route")
+    if isinstance(workflow_route, str) and workflow_route.strip():
+        try:
+            workflow_route = json.loads(workflow_route)
+        except Exception:
+            pass
     return {
         "id": row["id"],
         "title": row["title"],
@@ -2026,11 +2044,15 @@ def _task_response(row: sqlite3.Row) -> Dict[str, Any]:
         "worker_pid": row["worker_pid"],
         "last_heartbeat_at": row["last_heartbeat_at"],
         "current_run_id": row["current_run_id"],
-        "skills": row["skills"],
-        "model_override": row["model_override"],
-        "goal_mode": bool(row["goal_mode"]),
-        "goal_max_turns": row["goal_max_turns"],
-        "session_id": row["session_id"],
+        "skills": _row_value(row, "skills"),
+        "model_override": _row_value(row, "model_override"),
+        "goal_mode": bool(_row_value(row, "goal_mode", False)),
+        "goal_max_turns": _row_value(row, "goal_max_turns"),
+        "session_id": _row_value(row, "session_id"),
+        "workflow_template_id": _row_value(row, "workflow_template_id"),
+        "current_step_key": _row_value(row, "current_step_key"),
+        "workflow_route": workflow_route,
+        "workflowRoute": workflow_route,
     }
 
 
@@ -2120,6 +2142,17 @@ async def create_kanban_task(slug: str, request: Request):
     tenant = str(body.get("tenant") or "").strip() or None
     workspace_path = str(body.get("workspace_path") or "").strip() or None
     workspace_kind = _normalize_kanban_workspace_kind(body.get("workspace_kind"))
+    has_workflow_route, workflow_route_raw = _parse_workflow_route_payload(body)
+    workflow_route = None
+    if has_workflow_route:
+        from hermes_cli import kanban_db
+
+        try:
+            workflow_route = kanban_db.normalize_workflow_route(workflow_route_raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid workflowRoute: {exc}") from None
+        if not workflow_route:
+            raise HTTPException(status_code=400, detail="workflowRoute must contain at least one step")
     task_id = f"t_{uuid.uuid4().hex[:12]}"
     now = int(time.time())
     conn = _connect_kanban_board(slug)
@@ -2137,6 +2170,10 @@ async def create_kanban_task(slug: str, request: Request):
             (task_id, "task.created", json.dumps({"source": "desktop", "status": status}, ensure_ascii=False), now),
         )
         conn.commit()
+        if workflow_route is not None:
+            from hermes_cli import kanban_db
+
+            kanban_db.set_workflow_route(conn, task_id, workflow_route, actor="desktop")
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return JSONResponse(status_code=201, content={"object": "hermes.kanban.task", "task": _task_response(row)})
     finally:
@@ -2326,6 +2363,17 @@ async def update_kanban_task(slug: str, task_id: str, request: Request):
 
         updates: Dict[str, Any] = {}
         changes: Dict[str, Any] = {}
+        has_workflow_route, workflow_route_raw = _parse_workflow_route_payload(body)
+        workflow_route = None
+        if has_workflow_route:
+            from hermes_cli import kanban_db
+
+            try:
+                workflow_route = kanban_db.normalize_workflow_route(workflow_route_raw)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid workflowRoute: {exc}") from None
+            if not workflow_route:
+                raise HTTPException(status_code=400, detail="workflowRoute must contain at least one step")
 
         if "title" in body:
             title = str(body.get("title") or "").strip()
@@ -2389,6 +2437,69 @@ async def update_kanban_task(slug: str, task_id: str, request: Request):
             )
             conn.commit()
 
+        if workflow_route is not None:
+            from hermes_cli import kanban_db
+
+            kanban_db.set_workflow_route(conn, task_id, workflow_route, actor="desktop")
+
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return {"object": "hermes.kanban.task", "task": _task_response(row)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/kanban/boards/{slug}/tasks/{task_id}/workflow/apply-preset")
+async def apply_kanban_task_workflow_preset(slug: str, task_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid workflow preset payload")
+    from hermes_cli import kanban_db
+
+    preset_id = str(body.get("preset_id") or kanban_db.JURISHUB_WORKFLOW_PRESET_ID).strip()
+    assignee = str(body.get("assignee") or "").strip() or None
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        try:
+            kanban_db.workflow_apply_preset(conn, task_id, preset_id, assignee=assignee, actor="desktop")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return {"object": "hermes.kanban.task", "task": _task_response(row)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/kanban/boards/{slug}/tasks/{task_id}/workflow/evidence")
+async def create_kanban_task_workflow_evidence(slug: str, task_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid workflow evidence payload")
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Evidence text is required")
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT id, current_step_key FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        step_id = str(body.get("step_id") or task["current_step_key"] or "").strip()
+        if not step_id:
+            raise HTTPException(status_code=400, detail="Workflow step id is required")
+        from hermes_cli import kanban_db
+
+        try:
+            kanban_db.record_workflow_evidence(conn, task_id, step_id, text, actor="desktop")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return {"object": "hermes.kanban.task", "task": _task_response(row)}
     finally:
