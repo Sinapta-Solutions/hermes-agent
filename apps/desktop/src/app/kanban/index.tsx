@@ -574,6 +574,12 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
         assignees={assignees}
         boardSlug={selectedBoard?.slug ?? null}
         detail={detailTask ? detail : null}
+        onTaskArchived={archivedTaskId => {
+          setTasks(current => current.filter(item => item.id !== archivedTaskId))
+          setDetail(current => (current?.task.id === archivedTaskId ? null : current))
+          setDetailTaskId(current => (current === archivedTaskId ? null : current))
+          setSelectedTaskId(current => (current === archivedTaskId ? null : current))
+        }}
         onOpenChange={open => {
           if (!open) {
             setDetailTaskId(null)
@@ -702,6 +708,7 @@ function TaskDetailDialog({
   assignees,
   boardSlug,
   detail,
+  onTaskArchived,
   onOpenChange,
   onRefreshDetail,
   onTaskUpdated,
@@ -711,6 +718,7 @@ function TaskDetailDialog({
   assignees: string[]
   boardSlug: null | string
   detail: KanbanTaskDetailResponse | null
+  onTaskArchived: (taskId: string) => void
   onOpenChange: (open: boolean) => void
   onRefreshDetail: (taskId: string) => Promise<KanbanTaskDetailResponse | null>
   onTaskUpdated: (task: KanbanTask) => void
@@ -727,6 +735,7 @@ function TaskDetailDialog({
   const [savingComment, setSavingComment] = useState(false)
   const [savingCommentEdit, setSavingCommentEdit] = useState(false)
   const [savingTask, setSavingTask] = useState(false)
+  const [archivingTask, setArchivingTask] = useState(false)
   const activeTaskId = activeTask?.id ?? null
   const timeline = useMemo(() => buildTimeline(detail), [detail])
 
@@ -795,6 +804,24 @@ function TaskDetailDialog({
       notifyError(error, 'Failed to update Kanban task')
     } finally {
       setSavingTask(false)
+    }
+  }
+
+  const archiveTask = async () => {
+    if (!boardSlug || !activeTask) {
+      return
+    }
+
+    setArchivingTask(true)
+
+    try {
+      await updateKanbanTask(boardSlug, activeTask.id, { status: 'archived' })
+      onTaskArchived(activeTask.id)
+      notify({ title: 'Kanban', message: `Card arquivado: ${activeTask.title}` })
+    } catch (error) {
+      notifyError(error, 'Failed to archive Kanban task')
+    } finally {
+      setArchivingTask(false)
     }
   }
 
@@ -938,7 +965,15 @@ function TaskDetailDialog({
                       value={editForm.workspace_path}
                     />
                   </Field>
-                  <div className="flex justify-end">
+                  <div className="flex flex-wrap justify-between gap-2">
+                    <Button
+                      disabled={archivingTask || savingTask}
+                      onClick={() => void archiveTask()}
+                      type="button"
+                      variant="outline"
+                    >
+                      {archivingTask ? 'Arquivando…' : 'Arquivar card'}
+                    </Button>
                     <Button disabled={savingTask} onClick={() => void saveTask()} type="button">
                       {savingTask ? 'Salvando…' : 'Salvar alterações'}
                     </Button>

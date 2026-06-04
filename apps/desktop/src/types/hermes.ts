@@ -53,7 +53,7 @@ export interface WorkspaceEventsResponse {
   object: 'list'
 }
 
-export type KanbanStatus = 'triage' | 'todo' | 'scheduled' | 'ready' | 'running' | 'blocked' | 'done'
+export type KanbanStatus = 'triage' | 'todo' | 'scheduled' | 'ready' | 'running' | 'blocked' | 'done' | 'archived'
 
 export interface KanbanBoard {
   archived: boolean
