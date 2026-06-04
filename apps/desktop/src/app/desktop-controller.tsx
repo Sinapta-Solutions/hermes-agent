@@ -702,7 +702,7 @@ export function DesktopController() {
           <Route
             element={
               <Suspense fallback={null}>
-                <CronView setStatusbarItemGroup={setStatusbarItemGroup} />
+                <CronView onClose={closeOverlayToPreviousRoute} />
               </Suspense>
             }
             path="cron"
@@ -729,10 +729,7 @@ export function DesktopController() {
           <Route
             element={
               <Suspense fallback={null}>
-                <ProfilesView
-                  setStatusbarItemGroup={setStatusbarItemGroup}
-                  setTitlebarToolGroup={setTitlebarToolGroup}
-                />
+                <ProfilesView onClose={closeOverlayToPreviousRoute} />
               </Suspense>
             }
             path="profiles"

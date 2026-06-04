@@ -6,6 +6,7 @@ import { PaneShell } from '@/components/pane-shell'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import {
   $fileBrowserOpen,
+  $panesFlipped,
   $sidebarOpen,
   FILE_BROWSER_DEFAULT_WIDTH,
   FILE_BROWSER_PANE_ID,
@@ -23,8 +24,8 @@ interface AppShellProps {
   commandCenterOpen?: boolean
   leftStatusbarItems?: readonly StatusbarItem[]
   leftTitlebarTools?: readonly TitlebarTool[]
-  onOpenSettings: () => void
   onOpenSearch: () => void
+  onOpenSettings: () => void
   overlays?: ReactNode
   statusbarItems?: readonly StatusbarItem[]
   titlebarTools?: readonly TitlebarTool[]
@@ -47,17 +48,18 @@ const viewportIsFullscreen = () =>
 
 export function AppShell({
   children,
-  commandCenterOpen = false,
+  commandCenterOpen,
   leftStatusbarItems,
   leftTitlebarTools,
-  onOpenSettings,
   onOpenSearch,
+  onOpenSettings,
   overlays,
   statusbarItems,
   titlebarTools
 }: AppShellProps) {
   const sidebarOpen = useStore($sidebarOpen)
   const fileBrowserOpen = useStore($fileBrowserOpen)
+  const panesFlipped = useStore($panesFlipped)
   const fileBrowserWidthOverride = useStore($paneWidthOverride(FILE_BROWSER_PANE_ID))
   const connection = useStore($connection)
   const viewportFullscreen = useSyncExternalStore(subscribeWindowSize, viewportIsFullscreen, () => false)
@@ -69,7 +71,12 @@ export function AppShell({
   const nativeOverlayWidth = connection?.nativeOverlayWidth ?? 0
   const titlebarToolsRight = nativeOverlayWidth > 0 ? `${nativeOverlayWidth}px` : '0.75rem'
 
-  const titlebarContentInset = sidebarOpen
+  // The inset clears the top-left titlebar buttons when nothing covers the
+  // window's left edge. Default layout: the sessions sidebar sits there.
+  // Flipped layout: the file browser does instead.
+  const leftEdgePaneOpen = panesFlipped ? fileBrowserOpen : sidebarOpen
+
+  const titlebarContentInset = leftEdgePaneOpen
     ? 0
     : titlebarControls.left + TITLEBAR_HEIGHT + Math.round(TITLEBAR_HEIGHT / 2)
 
