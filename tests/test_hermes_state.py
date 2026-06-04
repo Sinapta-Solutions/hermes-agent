@@ -2993,16 +2993,46 @@ class TestCompressionChainProjection:
         with pytest.raises(ValueError, match="root1"):
             db.set_session_title("delegate1", "Kanban")
 
+    def test_titled_compression_children_are_visible_history_entries(self, db):
+        """Auto-titled compressed Desktop/TUI continuations are user sessions.
+
+        They must stay visible after restart instead of being collapsed into
+        one sidebar row forever. Untitled children remain hidden as likely
+        delegate/background noise.
+        """
+        import time as _time
+
+        root, _, mid, tip = self._build_compression_chain(db, _time.time() - 3600)
+        db.set_session_title(mid, "Início #2")
+        db.set_session_title(tip, "Início #3")
+
+        sessions = db.list_sessions_rich(source="cli", limit=20, min_message_count=1)
+        ids = [s["id"] for s in sessions]
+
+        assert mid in ids
+        assert tip in ids
+        assert root not in ids
+        assert ids.count(tip) == 1
+        assert "delegate1" not in ids
+        assert db.session_count(
+            source="cli",
+            min_message_count=1,
+            include_children=False,
+            project_compression_tips=True,
+        ) == len(ids)
+
     def test_list_without_projection_returns_raw_root(self, db):
         """project_compression_tips=False returns the raw parent-NULL root
         rows — useful for admin/debug UIs.
         """
         import time as _time
+
         self._build_compression_chain(db, _time.time() - 3600)
         sessions = db.list_sessions_rich(
             source="cli", limit=20, project_compression_tips=False
         )
         ids = [s["id"] for s in sessions]
+
         assert "root1" in ids
         assert "tip1" not in ids
 
