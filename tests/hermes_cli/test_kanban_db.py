@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 import types
@@ -1917,16 +1918,136 @@ def test_dir_workspace_honors_given_path(kanban_home, tmp_path):
     assert ws.exists()
 
 
-def test_worktree_workspace_returns_intended_path(kanban_home, tmp_path):
-    target = str(tmp_path / ".worktrees" / "my-task")
+def _init_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Hermes Test"], cwd=path, check=True)
+    (path / "README.md").write_text("# repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return path
+
+
+def _git_stdout(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return proc.stdout.strip()
+
+
+def test_worktree_workspace_creates_isolated_checkout_by_default(kanban_home, tmp_path, monkeypatch):
+    source = _init_git_repo(tmp_path / "source")
+    monkeypatch.chdir(source)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="ship", workspace_kind="worktree")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+
+    assert ws.exists()
+    assert ws.is_dir()
+    assert ws == kb.workspaces_root() / "worktrees" / t
+    assert task.workspace_path == str(ws)
+    assert task.branch_name == f"hermes/kanban/{t}"
+    assert Path(_git_stdout(ws, "rev-parse", "--show-toplevel")).resolve() == ws.resolve()
+    assert _git_stdout(ws, "branch", "--show-current") == f"hermes/kanban/{t}"
+
+
+def test_worktree_workspace_uses_configured_board_base_ref(kanban_home, tmp_path, monkeypatch):
+    source = _init_git_repo(tmp_path / "source")
+    original_branch = _git_stdout(source, "branch", "--show-current")
+    subprocess.run(["git", "checkout", "-b", "dev"], cwd=source, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    (source / "README.md").write_text("dev base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-m", "dev base"], cwd=source, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "checkout", original_branch], cwd=source, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    (source / "README.md").write_text("dispatcher head\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-m", "dispatcher head"], cwd=source, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    monkeypatch.chdir(tmp_path)
+    kb.create_board("jur", default_workdir=str(source), worktree_base_ref="dev")
+
+    with kb.connect(board="jur") as conn:
+        t = kb.create_task(conn, title="juris agent", workspace_kind="worktree", board="jur")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task, board="jur")
+
+    assert _git_stdout(source, "branch", "--show-current") == original_branch
+    assert _git_stdout(ws, "branch", "--show-current") == f"hermes/kanban/{t}"
+    assert (ws / "README.md").read_text(encoding="utf-8") == "dev base\n"
+
+
+def test_worktree_workspace_honors_explicit_target_path(kanban_home, tmp_path, monkeypatch):
+    source = _init_git_repo(tmp_path / "source")
+    monkeypatch.chdir(source)
+    target = tmp_path / ".worktrees" / "my-task"
+
     with kb.connect() as conn:
         t = kb.create_task(
-            conn, title="ship", workspace_kind="worktree", workspace_path=target
+            conn, title="ship", workspace_kind="worktree", workspace_path=str(target)
         )
         task = kb.get_task(conn, t)
         ws = kb.resolve_workspace(task)
-    # We do NOT auto-create worktrees; the worker's skill handles that.
-    assert str(ws) == target
+
+    assert ws == target.resolve()
+    assert ws.exists()
+    assert _git_stdout(ws, "branch", "--show-current") == f"hermes/kanban/{t}"
+
+
+def test_dispatch_worktree_tasks_get_distinct_persisted_checkouts(kanban_home, tmp_path, monkeypatch):
+    from hermes_cli import profiles
+
+    source = _init_git_repo(tmp_path / "source")
+    monkeypatch.chdir(source)
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
+    spawned: list[tuple[str, str, str | None, str | None]] = []
+
+    def fake_spawn(task, workspace):
+        spawned.append((task.id, workspace, task.workspace_path, task.branch_name))
+        return None
+
+    with kb.connect() as conn:
+        t1 = kb.create_task(conn, title="one", assignee="alice", workspace_kind="worktree")
+        t2 = kb.create_task(conn, title="two", assignee="bob", workspace_kind="worktree")
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn, max_spawn=2)
+        task1 = kb.get_task(conn, t1)
+        task2 = kb.get_task(conn, t2)
+
+    assert {item[0] for item in spawned} == {t1, t2}
+    assert {item[0] for item in res.spawned} == {t1, t2}
+    assert task1.workspace_path and task2.workspace_path
+    assert task1.workspace_path != task2.workspace_path
+    assert task1.branch_name == f"hermes/kanban/{t1}"
+    assert task2.branch_name == f"hermes/kanban/{t2}"
+    assert Path(task1.workspace_path).exists()
+    assert Path(task2.workspace_path).exists()
+    assert all(workspace == persisted for _, workspace, persisted, _ in spawned)
+
+
+def test_dispatch_worktree_without_git_repo_records_workspace_failure(kanban_home, tmp_path, monkeypatch):
+    from hermes_cli import profiles
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
+
+    def should_not_spawn(task, workspace):  # pragma: no cover - must not run
+        raise AssertionError("dispatcher spawned without a git worktree")
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="no repo", assignee="alice", workspace_kind="worktree")
+        res = kb.dispatch_once(conn, spawn_fn=should_not_spawn)
+        task = kb.get_task(conn, t)
+
+    assert res.spawned == []
+    assert task.status == "ready"
+    assert task.last_failure_error
+    assert "workspace_kind=worktree requires a git repository" in task.last_failure_error
 
 
 # ---------------------------------------------------------------------------
@@ -2777,6 +2898,7 @@ def test_resolve_hermes_argv_prefers_path_shim(monkeypatch):
     import hermes_cli.kanban_db as kb
 
     monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.setattr(kb, "_IS_WINDOWS", False)
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/hermes")
     argv = kb._resolve_hermes_argv()
     assert argv == ["/usr/local/bin/hermes"]
@@ -2896,6 +3018,7 @@ def test_resolve_hermes_argv_falls_back_to_module_form_when_no_path_shim(monkeyp
     import hermes_cli.kanban_db as kb
 
     monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.setattr(kb, "_IS_WINDOWS", False)
     monkeypatch.setattr(shutil, "which", lambda name: None)
     argv = kb._resolve_hermes_argv()
     assert argv == [sys.executable, "-m", "hermes_cli.main"]
@@ -4091,9 +4214,10 @@ def test_reap_worker_zombies_returns_count():
             return p, 0
         return 0, 0
 
-    with patch("hermes_cli.kanban_db.os.waitpid", side_effect=fake_waitpid):
-        with patch("hermes_cli.kanban_db._record_worker_exit"):
-            pids = kb.reap_worker_zombies()
+    with patch("hermes_cli.kanban_db.os.name", "posix"):
+        with patch("hermes_cli.kanban_db.os.waitpid", side_effect=fake_waitpid):
+            with patch("hermes_cli.kanban_db._record_worker_exit"):
+                pids = kb.reap_worker_zombies()
     assert pids == [12345, 67890, 11111]
 
 
@@ -4130,12 +4254,13 @@ def test_reap_worker_zombies_records_exit_status():
             return 12345, 0
         return 0, 0
 
-    with patch("hermes_cli.kanban_db.os.waitpid", side_effect=fake_waitpid):
-        with patch(
-            "hermes_cli.kanban_db._record_worker_exit",
-            side_effect=lambda p, s: calls.append((p, s)),
-        ):
-            kb.reap_worker_zombies()
+    with patch("hermes_cli.kanban_db.os.name", "posix"):
+        with patch("hermes_cli.kanban_db.os.waitpid", side_effect=fake_waitpid):
+            with patch(
+                "hermes_cli.kanban_db._record_worker_exit",
+                side_effect=lambda p, s: calls.append((p, s)),
+            ):
+                kb.reap_worker_zombies()
 
     assert calls == [(12345, 0)]
 
@@ -4161,16 +4286,17 @@ def test_zombie_reaper_runs_despite_board_connect_failure():
             return [12345, 67890][call_count[0] - 1], 0
         return 0, 0
 
-    with patch("hermes_cli.kanban_db.os.waitpid", side_effect=fake_waitpid):
-        with patch("hermes_cli.kanban_db._record_worker_exit"):
-            # Simulate a board tick failure before reaping
-            try:
-                raise sqlite3.OperationalError("disk I/O error")
-            except sqlite3.OperationalError:
-                pass
+    with patch("hermes_cli.kanban_db.os.name", "posix"):
+        with patch("hermes_cli.kanban_db.os.waitpid", side_effect=fake_waitpid):
+            with patch("hermes_cli.kanban_db._record_worker_exit"):
+                # Simulate a board tick failure before reaping
+                try:
+                    raise sqlite3.OperationalError("disk I/O error")
+                except sqlite3.OperationalError:
+                    pass
 
-            # Reaper still runs independently
-            pids = kb.reap_worker_zombies()
+                # Reaper still runs independently
+                pids = kb.reap_worker_zombies()
 
     assert pids == [12345, 67890]
 
@@ -4196,11 +4322,12 @@ def test_zombie_reaper_survives_all_boards_failing():
     # 5 ticks, 2 zombies per tick = 10 total
     for tick in range(5):
         pids = [tick * 100 + 1, tick * 100 + 2]
-        with patch(
-            "hermes_cli.kanban_db.os.waitpid", side_effect=make_fake_waitpid(pids)
-        ):
-            with patch("hermes_cli.kanban_db._record_worker_exit"):
-                pids = kb.reap_worker_zombies()
+        with patch("hermes_cli.kanban_db.os.name", "posix"):
+            with patch(
+                "hermes_cli.kanban_db.os.waitpid", side_effect=make_fake_waitpid(pids)
+            ):
+                with patch("hermes_cli.kanban_db._record_worker_exit"):
+                    pids = kb.reap_worker_zombies()
         total_reaped += len(pids)
 
     assert total_reaped == 10

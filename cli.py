@@ -15402,6 +15402,11 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
         if resp:
             print(resp)
+            try:
+                from tools.kanban_tools import comment_current_worker_response_from_env as _auto_comment
+                _auto_comment(resp, phase="goal-loop")
+            except Exception:
+                logger.debug("kanban goal-loop auto-comment failed", exc_info=True)
         return resp or ""
 
     def _task_status() -> "str | None":
@@ -15840,6 +15845,13 @@ def main(
                         print(f"Error: {result['error']}", file=sys.stderr)
                     elif response:
                         print(response)
+
+                    if response and os.environ.get("HERMES_KANBAN_TASK"):
+                        try:
+                            from tools.kanban_tools import comment_current_worker_response_from_env as _auto_comment
+                            _auto_comment(response, phase="response")
+                        except Exception:
+                            logger.debug("kanban worker auto-comment failed", exc_info=True)
 
                     # Kanban goal-loop mode: a worker spawned for a
                     # goal_mode card keeps working in THIS session until an

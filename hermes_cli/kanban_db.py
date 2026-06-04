@@ -517,6 +517,7 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
         "icon": "",
         "color": "",
         "default_workdir": None,
+        "worktree_base_ref": None,
         "created_at": None,
         "archived": False,
     }
@@ -544,6 +545,7 @@ def write_board_metadata(
     color: Optional[str] = None,
     archived: Optional[bool] = None,
     default_workdir: Optional[str] = None,
+    worktree_base_ref: Optional[str] = None,
 ) -> dict:
     """Create / update ``board.json`` for ``board``.
 
@@ -567,6 +569,8 @@ def write_board_metadata(
         meta["archived"] = bool(archived)
     if default_workdir is not None:
         meta["default_workdir"] = str(default_workdir) if default_workdir else None
+    if worktree_base_ref is not None:
+        meta["worktree_base_ref"] = str(worktree_base_ref).strip() or None
     if not meta.get("created_at"):
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
@@ -587,6 +591,7 @@ def create_board(
     icon: Optional[str] = None,
     color: Optional[str] = None,
     default_workdir: Optional[str] = None,
+    worktree_base_ref: Optional[str] = None,
 ) -> dict:
     """Create a new board directory + DB + metadata. Idempotent.
 
@@ -604,6 +609,7 @@ def create_board(
         icon=icon,
         color=color,
         default_workdir=default_workdir,
+        worktree_base_ref=worktree_base_ref,
     )
     # Touch the DB so list_boards() sees it immediately.
     init_db(board=normed)
@@ -2155,14 +2161,15 @@ def create_task(
 
     # Resolve workspace_path from board-level default_workdir when the
     # caller did not specify one explicitly. Board defaults represent
-    # persistent project checkouts, so only persistent workspace kinds may
-    # inherit them. Scratch workspaces are auto-deleted on completion and
-    # must stay under the per-board scratch root created by
-    # ``resolve_workspace``; inheriting ``default_workdir`` for a scratch
-    # task would point cleanup at the user's source tree (#28818). The
-    # containment guard in ``_cleanup_workspace`` is the safety rail, but
-    # we also stop the bad state from being created in the first place.
-    if workspace_path is None and workspace_kind in {"dir", "worktree"}:
+    # persistent project checkouts, so only ``dir`` tasks inherit them
+    # directly. Scratch workspaces are auto-deleted on completion and must
+    # stay under the per-board scratch root created by ``resolve_workspace``;
+    # inheriting ``default_workdir`` for a scratch task would point cleanup at
+    # the user's source tree (#28818). Worktree tasks use ``default_workdir``
+    # as the *source repo* but get their own isolated checkout path under the
+    # board workspace root, so do not store the source checkout as
+    # ``workspace_path`` here.
+    if workspace_path is None and workspace_kind == "dir":
         board_slug = board if board else get_current_board()
         board_meta = read_board_metadata(board_slug)
         board_default = board_meta.get("default_workdir")
@@ -4595,6 +4602,128 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 # Workspace resolution
 # ---------------------------------------------------------------------------
 
+def _run_git(args: list[str], *, cwd: Optional[Path] = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    """Run git and return the completed process with normalized text output."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _git_toplevel(path: Path) -> Optional[Path]:
+    proc = _run_git(["-C", str(path), "rev-parse", "--show-toplevel"], timeout=10)
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout.strip()
+    return Path(out).expanduser().resolve() if out else None
+
+
+def _require_git_toplevel(path: Path, *, purpose: str) -> Path:
+    root = _git_toplevel(path)
+    if root is None:
+        raise ValueError(f"{purpose} is not inside a git repository: {path}")
+    return root
+
+
+def _default_worktree_path(task_id: str, *, board: Optional[str] = None) -> Path:
+    return workspaces_root(board=board) / "worktrees" / task_id
+
+
+def _default_worktree_branch(task_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._/-]+", "-", task_id).strip("-./") or "task"
+    return f"hermes/kanban/{safe}"
+
+
+def _worktree_source_repo(*, board: Optional[str] = None) -> Path:
+    board_slug = board if board else get_current_board()
+    board_meta = read_board_metadata(board_slug)
+    board_default = board_meta.get("default_workdir")
+    candidates = []
+    if board_default:
+        candidates.append(Path(str(board_default)).expanduser())
+    candidates.append(Path.cwd())
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        root = _git_toplevel(candidate)
+        if root is not None:
+            return root
+    raise ValueError(
+        "workspace_kind=worktree requires a git repository; set the board "
+        "default_workdir to the source checkout or run the dispatcher from one"
+    )
+
+
+def _branch_exists(repo: Path, branch: str) -> bool:
+    proc = _run_git(["-C", str(repo), "rev-parse", "--verify", f"refs/heads/{branch}"], timeout=10)
+    return proc.returncode == 0
+
+
+def _git_ref_exists(repo: Path, ref: str) -> bool:
+    proc = _run_git(["-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=10)
+    return proc.returncode == 0
+
+
+def _worktree_base_ref(repo: Path, *, board: Optional[str] = None) -> str:
+    """Return the configured source ref used when creating a task branch."""
+    board_slug = board if board else get_current_board()
+    board_meta = read_board_metadata(board_slug)
+    configured = (
+        board_meta.get("worktree_base_ref")
+        or board_meta.get("base_ref")
+        or board_meta.get("base_branch")
+        or board_meta.get("default_branch")
+    )
+    ref = str(configured).strip() if configured else "HEAD"
+    if not _git_ref_exists(repo, ref):
+        raise ValueError(f"worktree base ref {ref!r} does not exist in source repository: {repo}")
+    return ref
+
+
+def _ensure_git_worktree(task: Task, target: Path, *, board: Optional[str] = None) -> Path:
+    if not target.is_absolute():
+        raise ValueError(
+            f"task {task.id} has non-absolute worktree path {str(target)!r}; use an absolute path"
+        )
+
+    branch = (task.branch_name or "").strip() or _default_worktree_branch(task.id)
+
+    if target.exists():
+        existing_root = _git_toplevel(target)
+        if existing_root is None:
+            raise ValueError(
+                f"task {task.id} worktree path already exists but is not a git worktree: {target}"
+            )
+        task.workspace_path = str(existing_root)
+        task.branch_name = branch
+        return existing_root
+
+    repo = _worktree_source_repo(board=board)
+    base_ref = _worktree_base_ref(repo, board=board)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if _branch_exists(repo, branch):
+        cmd = ["-C", str(repo), "worktree", "add", str(target), branch]
+    else:
+        cmd = ["-C", str(repo), "worktree", "add", "-b", branch, str(target), base_ref]
+    proc = _run_git(cmd, timeout=120)
+    if proc.returncode != 0:
+        error = (proc.stderr or proc.stdout or "git worktree add failed").strip()
+        raise RuntimeError(f"git worktree add failed for task {task.id}: {error}")
+
+    created_root = _require_git_toplevel(target, purpose="created worktree")
+    task.workspace_path = str(created_root)
+    task.branch_name = branch
+    return created_root
+
+
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     """Resolve (and create if needed) the workspace for a task.
 
@@ -4608,9 +4737,11 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
       resolves against the dispatcher's CWD instead of a meaningful
       root.  Users who want a kanban-root-relative workspace should
       compute the absolute path themselves.
-    - ``worktree``: a git worktree at ``workspace_path``.  Not created
-      automatically in v1 -- the kanban-worker skill documents
-      ``git worktree add`` as a worker-side step.  Returns the intended path.
+    - ``worktree``: an isolated git worktree.  If ``workspace_path`` is
+      absent, Hermes creates one under ``<board-root>/workspaces/worktrees/<id>/``.
+      If ``branch_name`` is absent, Hermes uses ``hermes/kanban/<id>``.
+      The source repository is the board ``default_workdir`` when set,
+      otherwise the dispatcher's current git repository.
 
     Persist the resolved path back to the task row via ``set_workspace_path``
     so subsequent runs reuse the same directory.
@@ -4630,6 +4761,7 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
         else:
             p = workspaces_root(board=board) / task.id
         p.mkdir(parents=True, exist_ok=True)
+        task.workspace_path = str(p)
         return p
     if kind == "dir":
         if not task.workspace_path:
@@ -4644,29 +4776,32 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
                 f"(relative paths are ambiguous against the dispatcher's CWD)"
             )
         p.mkdir(parents=True, exist_ok=True)
+        task.workspace_path = str(p)
         return p
     if kind == "worktree":
-        if not task.workspace_path:
-            # Default: .worktrees/<id>/ under CWD.  Worker skill creates it.
-            return Path.cwd() / ".worktrees" / task.id
-        p = Path(task.workspace_path).expanduser()
-        if not p.is_absolute():
-            raise ValueError(
-                f"task {task.id} has non-absolute worktree path "
-                f"{task.workspace_path!r}; use an absolute path"
-            )
-        return p
+        p = Path(task.workspace_path).expanduser() if task.workspace_path else _default_worktree_path(task.id, board=board)
+        return _ensure_git_worktree(task, p, board=board)
     raise ValueError(f"unknown workspace_kind: {kind}")
 
 
 def set_workspace_path(
-    conn: sqlite3.Connection, task_id: str, path: Path | str
+    conn: sqlite3.Connection,
+    task_id: str,
+    path: Path | str,
+    *,
+    branch_name: Optional[str] = None,
 ) -> None:
     with write_txn(conn):
-        conn.execute(
-            "UPDATE tasks SET workspace_path = ? WHERE id = ?",
-            (str(path), task_id),
-        )
+        if branch_name is None:
+            conn.execute(
+                "UPDATE tasks SET workspace_path = ? WHERE id = ?",
+                (str(path), task_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE tasks SET workspace_path = ?, branch_name = ? WHERE id = ?",
+                (str(path), branch_name, task_id),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -4890,17 +5025,29 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
         return ("unknown", None)
     raw, _ = entry
     try:
-        if os.WIFEXITED(raw):
+        if hasattr(os, "WIFEXITED") and os.WIFEXITED(raw):
             code = os.WEXITSTATUS(raw)
             if code == 0:
                 return ("clean_exit", 0)
             if code == KANBAN_RATE_LIMIT_EXIT_CODE:
                 return ("rate_limited", code)
             return ("nonzero_exit", code)
-        if os.WIFSIGNALED(raw):
+        if hasattr(os, "WIFSIGNALED") and os.WIFSIGNALED(raw):
             return ("signaled", os.WTERMSIG(raw))
     except Exception:
         pass
+
+    # Windows lacks the POSIX WIF*/WEXITSTATUS helpers, but tests and some
+    # mocked dispatch paths still store POSIX wait-style statuses. Decode the
+    # conventional ``exit_code << 8`` shape so rate-limit sentinels remain
+    # classifiable under Windows test/runtime shims.
+    if raw >= 0 and raw & 0xFF == 0:
+        code = raw >> 8
+        if code == 0:
+            return ("clean_exit", 0)
+        if code == KANBAN_RATE_LIMIT_EXIT_CODE:
+            return ("rate_limited", code)
+        return ("nonzero_exit", code)
     return ("unknown", None)
 
 
@@ -4911,19 +5058,24 @@ def reap_worker_zombies() -> "list[int]":
     children (returns []). No-op on Windows.
     """
     reaped: "list[int]" = []
-    if os.name != "nt":
-        try:
-            while True:
-                try:
-                    pid, status = os.waitpid(-1, os.WNOHANG)
-                except ChildProcessError:
-                    break
-                if pid == 0:
-                    break
-                _record_worker_exit(pid, status)
-                reaped.append(pid)
-        except Exception:
-            pass
+    if os.name == "nt":
+        return reaped
+    waitpid = getattr(os, "waitpid", None)
+    wnohang = getattr(os, "WNOHANG", 1)
+    if waitpid is None:
+        return reaped
+    try:
+        while True:
+            try:
+                pid, status = waitpid(-1, wnohang)
+            except ChildProcessError:
+                break
+            if pid == 0:
+                break
+            _record_worker_exit(pid, status)
+            reaped.append(pid)
+    except Exception:
+        pass
     return reaped
 
 
@@ -6203,10 +6355,12 @@ def dispatch_once(
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
-        # Persist the resolved workspace path so the worker can cd there.
-        set_workspace_path(conn, claimed.id, str(workspace))
+        # Persist the resolved workspace path/branch so worker context and
+        # later dispatcher ticks reuse the same isolated checkout.
+        set_workspace_path(conn, claimed.id, str(workspace), branch_name=claimed.branch_name)
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
+
         try:
             # Back-compat: older spawn_fn signatures accept only
             # (task, workspace). Test stubs in the suite rely on that.
@@ -6289,10 +6443,12 @@ def dispatch_once(
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
-        # Persist the resolved workspace path so the worker can cd there.
-        set_workspace_path(conn, claimed.id, str(workspace))
+        # Persist the resolved workspace path/branch so worker context and
+        # later dispatcher ticks reuse the same isolated checkout.
+        set_workspace_path(conn, claimed.id, str(workspace), branch_name=claimed.branch_name)
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        # Force-load sdlc-review skill for review agents.  The
+
+        # Force-load sdlc-review skill for review agents. The
         # _default_spawn function already auto-loads kanban-worker, and
         # appends task.skills via --skills.  Setting task.skills here
         # means the review agent gets both kanban-worker (lifecycle)
@@ -6442,7 +6598,7 @@ def _path_search_names(command: str) -> list[str]:
         return [command]
     raw = os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
     exts = [ext for ext in raw.split(";") if ext]
-    return [command + ext for ext in exts]
+    return [command, *(command + ext for ext in exts)]
 
 
 def _safe_which_no_cwd(command: str) -> Optional[str]:

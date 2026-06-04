@@ -198,6 +198,7 @@ def _connect(board: Optional[str] = None):
 #     explicit tool which carries a model-supplied note.
 
 _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
+_AUTO_WORKER_COMMENT_MAX_CHARS = 6000
 _auto_heartbeat_last_attempt: float = 0.0
 
 
@@ -257,6 +258,59 @@ def heartbeat_current_worker_from_env() -> bool:
         return True
     except Exception:
         logger.debug("auto-heartbeat: bridge failed", exc_info=True)
+        return False
+
+
+def comment_current_worker_response_from_env(response: str, *, phase: str = "response") -> bool:
+    """Best-effort: mirror a dispatcher worker's visible reply into task comments.
+
+    The board UI is comment/event driven. If a worker exits after printing a
+    normal final response but forgets to call ``kanban_comment`` explicitly,
+    operators otherwise have to dig through subprocess logs to see what it
+    said. This helper is intentionally best-effort and never raises; terminal
+    lifecycle remains governed by ``kanban_complete`` / ``kanban_block``.
+    """
+    tid = os.environ.get("HERMES_KANBAN_TASK")
+    text = (response or "").strip()
+    if not tid or not text:
+        return False
+
+    if len(text) > _AUTO_WORKER_COMMENT_MAX_CHARS:
+        omitted = len(text) - _AUTO_WORKER_COMMENT_MAX_CHARS
+        text = (
+            text[:_AUTO_WORKER_COMMENT_MAX_CHARS].rstrip()
+            + f"\n\n[… {omitted} chars omitted from auto-comment]"
+        )
+
+    author = (
+        os.environ.get("HERMES_PROFILE")
+        or os.environ.get("HERMES_KANBAN_ASSIGNEE")
+        or "kanban-worker"
+    )
+    run_id = os.environ.get("HERMES_KANBAN_RUN_ID")
+    session_id = os.environ.get("HERMES_SESSION_ID")
+    meta = []
+    if run_id:
+        meta.append(f"run {run_id}")
+    if session_id:
+        meta.append(f"session {session_id}")
+    label = f"worker {phase.strip() or 'response'}"
+    if meta:
+        label += f" ({', '.join(meta)})"
+    body = f"{label}:\n\n{text}"
+
+    try:
+        kb, conn = _connect()
+        try:
+            kb.add_comment(conn, tid, author=author, body=body)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return True
+    except Exception:
+        logger.debug("kanban auto-comment failed", exc_info=True)
         return False
 
 

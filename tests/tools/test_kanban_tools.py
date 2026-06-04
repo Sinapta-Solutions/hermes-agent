@@ -196,6 +196,26 @@ def test_show_explicit_task_id(worker_env):
     assert d["task"]["id"] == other
 
 
+def test_auto_worker_response_comment_defaults_to_env_task(worker_env, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "42")
+    monkeypatch.setenv("HERMES_SESSION_ID", "sess-auto")
+
+    assert kt.comment_current_worker_response_from_env("feito com detalhes") is True
+
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, worker_env)
+        assert len(comments) == 1
+        assert comments[0].author == "test-worker"
+        assert "worker response (run 42, session sess-auto)" in comments[0].body
+        assert "feito com detalhes" in comments[0].body
+    finally:
+        conn.close()
+
+
 def test_list_filters_tasks(monkeypatch, worker_env):
     """kanban_list gives orchestrators filtered board discovery."""
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)

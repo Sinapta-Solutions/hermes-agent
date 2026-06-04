@@ -1502,6 +1502,7 @@ def _ensure_workspaces_db() -> sqlite3.Connection:
           repo_path TEXT,
           vault_path TEXT,
           board_id TEXT,
+          branch TEXT,
           description TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -1540,6 +1541,9 @@ def _ensure_workspaces_db() -> sqlite3.Connection:
           ON workspace_tasks(workspace_id, status);
         """
     )
+    workspace_columns = {row[1] for row in conn.execute("PRAGMA table_info(workspaces)")}
+    if "branch" not in workspace_columns:
+        conn.execute("ALTER TABLE workspaces ADD COLUMN branch TEXT")
     conn.commit()
     _workspaces_conn = conn
     return conn
@@ -1566,6 +1570,7 @@ def _workspace_response(row: sqlite3.Row) -> Dict[str, Any]:
         "repo_path": row["repo_path"],
         "vault_path": row["vault_path"],
         "board_id": row["board_id"],
+        "branch": row["branch"],
         "description": row["description"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -1608,6 +1613,35 @@ def _get_workspace_row(workspace_id: str) -> sqlite3.Row:
     if row is None:
         raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}")
     return row
+
+
+def _workspace_board_slug(row: sqlite3.Row) -> Optional[str]:
+    raw = _workspace_text(row["board_id"], max_len=160)
+    return _safe_board_slug(raw) if raw else None
+
+
+def _sync_workspace_board_metadata(row: sqlite3.Row) -> None:
+    """Mirror Workspace repo/branch into the linked Kanban board metadata."""
+    slug = _workspace_board_slug(row)
+    if not slug:
+        return
+
+    board_dir = _board_dir(slug)
+    board_dir.mkdir(parents=True, exist_ok=True)
+    meta = _read_board_meta(slug) or {
+        "slug": slug,
+        "name": row["name"],
+        "description": row["description"],
+        "icon": "◫",
+        "color": "#cba6f7",
+        "created_at": int(time.time()),
+        "archived": False,
+    }
+    meta["workspace_id"] = row["id"]
+    meta["default_workdir"] = row["repo_path"]
+    meta["worktree_base_ref"] = row["branch"]
+    meta["updated_at"] = int(time.time())
+    (board_dir / "board.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 async def _workspace_body(request: Request) -> Dict[str, Any]:

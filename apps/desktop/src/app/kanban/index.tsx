@@ -1,5 +1,5 @@
 import type * as React from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -70,12 +70,137 @@ const STATUSES: Array<{ accent: string; description: string; label: string; valu
   { value: 'done', label: 'Done', description: 'Concluído/revisado', accent: 'var(--ui-accent)' }
 ]
 
+const KANBAN_VISIBLE_CARD_LIMIT = 5
+const KANBAN_COLUMN_SCROLL_MAX_HEIGHT = `calc(${KANBAN_VISIBLE_CARD_LIMIT} * 8.5rem + ${KANBAN_VISIBLE_CARD_LIMIT - 1} * 0.5rem)`
+const KANBAN_FAST_POLL_MS = 3000
+const KANBAN_IDLE_POLL_MS = 10000
+
+interface TimelineItem {
+  body?: string
+  key: string
+  label: string
+  meta?: string
+  payload?: KanbanEvent['payload'] | Record<string, unknown> | null | string
+  time: number
+  type: 'comment' | 'event' | 'failure' | 'run'
+}
+
 function formatTime(value?: null | number) {
   if (!value) {
     return '—'
   }
 
   return new Date(value * 1000).toLocaleString()
+}
+
+function formatShortDuration(seconds: number) {
+  const safeSeconds = Math.max(0, Math.floor(seconds))
+
+  if (safeSeconds < 60) {
+    return `${safeSeconds}s`
+  }
+
+  const minutes = Math.floor(safeSeconds / 60)
+
+  if (minutes < 60) {
+    return `${minutes}m`
+  }
+
+  const hours = Math.floor(minutes / 60)
+
+  if (hours < 24) {
+    return `${hours}h`
+  }
+
+  return `${Math.floor(hours / 24)}d`
+}
+
+function formatAgo(value: null | number | undefined, nowSeconds: number) {
+  if (!value) {
+    return '—'
+  }
+
+  return `há ${formatShortDuration(nowSeconds - value)}`
+}
+
+function kanbanWorkspaceKind(value?: null | string) {
+  return value === 'scratch' || value === 'dir' || value === 'worktree' ? value : 'scratch'
+}
+
+function latestRunTimestamp(run: Record<string, unknown>) {
+  const endedAt = typeof run.ended_at === 'number' ? run.ended_at : null
+  const startedAt = typeof run.started_at === 'number' ? run.started_at : null
+
+  return endedAt ?? startedAt ?? 0
+}
+
+function buildTimeline(detail: KanbanTaskDetailResponse | null): TimelineItem[] {
+  if (!detail) {
+    return []
+  }
+
+  const comments: TimelineItem[] = detail.comments.map(comment => ({
+    body: comment.body,
+    key: `comment-${comment.id}`,
+    label: `Comentário · ${comment.author}`,
+    time: comment.created_at,
+    type: 'comment'
+  }))
+
+  const events: TimelineItem[] = detail.events.map(event => ({
+    key: `event-${event.id}`,
+    label: `Evento · ${event.kind}`,
+    meta: event.run_id ? `run ${event.run_id}` : undefined,
+    payload: event.payload,
+    time: event.created_at,
+    type: 'event'
+  }))
+
+  const failures: TimelineItem[] = (detail.failures ?? []).map((failure, index) => ({
+    body: failure.error || failure.summary || failure.outcome || failure.kind || 'Falha sem mensagem',
+    key: `failure-${failure.source}-${failure.run_id ?? failure.event_id ?? index}`,
+    label: `Falha · ${failure.source}`,
+    meta: failure.profile ?? undefined,
+    payload: failure.payload,
+    time: failure.started_at ?? failure.ended_at ?? 0,
+    type: 'failure'
+  }))
+
+  const runs: TimelineItem[] = detail.runs.map((run, index) => ({
+    body: run.summary ? String(run.summary) : run.error ? String(run.error) : undefined,
+    key: `run-${String(run.id ?? index)}`,
+    label: `Run · ${String(run.status ?? 'run')}`,
+    meta: run.profile ? String(run.profile) : undefined,
+    payload: run,
+    time: latestRunTimestamp(run),
+    type: 'run'
+  }))
+
+  return [...comments, ...events, ...failures, ...runs].sort((left, right) => right.time - left.time)
+}
+
+function latestTaskSignal(task: KanbanTask, nowSeconds: number) {
+  if (task.status === 'running') {
+    if (task.last_heartbeat_at) {
+      return `heartbeat ${formatAgo(task.last_heartbeat_at, nowSeconds)}`
+    }
+
+    if (task.started_at) {
+      return `rodando ${formatAgo(task.started_at, nowSeconds)}`
+    }
+
+    return 'rodando agora'
+  }
+
+  if (task.last_failure_error) {
+    return 'última falha registrada'
+  }
+
+  if (task.completed_at) {
+    return `concluído ${formatAgo(task.completed_at, nowSeconds)}`
+  }
+
+  return task.started_at ? `iniciado ${formatAgo(task.started_at, nowSeconds)}` : null
 }
 
 function formatPayload(value: KanbanEvent['payload'] | Record<string, unknown> | null | string | undefined) {
@@ -110,7 +235,9 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   const [createOpen, setCreateOpen] = useState(false)
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000))
   const [saving, setSaving] = useState(false)
+  const pollInFlightRef = useRef(false)
 
   const selectedBoard = useMemo(
     () => boards.find(board => board.slug === selectedBoardSlug) ?? boards[0] ?? null,
@@ -158,6 +285,34 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
 
     void refreshTasks(selectedBoard.slug).catch(error => notifyError(error, 'Failed to load Kanban tasks'))
   }, [refreshTasks, selectedBoard?.slug])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowSeconds(Math.floor(Date.now() / 1000)), 1000)
+
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    if (!selectedBoard?.slug) {
+      return
+    }
+
+    const intervalMs = tasks.some(task => task.status === 'running') ? KANBAN_FAST_POLL_MS : KANBAN_IDLE_POLL_MS
+    const timer = window.setInterval(() => {
+      if (pollInFlightRef.current) {
+        return
+      }
+
+      pollInFlightRef.current = true
+      void refreshTasks(selectedBoard.slug)
+        .catch(error => notifyError(error, 'Failed to auto-refresh Kanban tasks'))
+        .finally(() => {
+          pollInFlightRef.current = false
+        })
+    }, intervalMs)
+
+    return () => window.clearInterval(timer)
+  }, [refreshTasks, selectedBoard?.slug, tasks])
 
   const loadTaskDetail = useCallback(
     async (taskId: string) => {
@@ -222,7 +377,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
         status: form.status,
         tenant: form.tenant.trim() || null,
         title: form.title.trim(),
-        workspace_kind: 'repo',
+        workspace_kind: form.workspace_path.trim() ? 'dir' : 'scratch',
         workspace_path: form.workspace_path.trim() || selectedBoard.default_workdir || null
       })
 
@@ -294,6 +449,11 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
           <Button onClick={() => setCreateOpen(true)} type="button">
             <Codicon name="add" /> Novo card
           </Button>
+          <div className="hidden text-right text-[0.68rem] leading-tight text-(--ui-text-quaternary) md:block">
+            Auto-refresh
+            <br />
+            {tasks.some(task => task.status === 'running') ? '3s em execução' : '10s ocioso'}
+          </div>
           <Button onClick={() => void refresh()} type="button" variant="secondary">
             Refresh
           </Button>
@@ -353,7 +513,22 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                       {taskCount(tasks, column.value)}
                     </span>
                   </div>
-                  <div className="flex flex-col gap-2">
+                  {columnTasks.length > KANBAN_VISIBLE_CARD_LIMIT && (
+                    <div className="mb-2 text-[0.68rem] text-(--ui-text-quaternary)">
+                      Mostrando 5 cards visíveis; role para ver mais {columnTasks.length - KANBAN_VISIBLE_CARD_LIMIT}.
+                    </div>
+                  )}
+                  <div
+                    className={cn(
+                      'flex flex-col gap-2 pr-1',
+                      columnTasks.length > KANBAN_VISIBLE_CARD_LIMIT && 'overflow-y-auto overscroll-contain'
+                    )}
+                    style={
+                      columnTasks.length > KANBAN_VISIBLE_CARD_LIMIT
+                        ? { maxHeight: KANBAN_COLUMN_SCROLL_MAX_HEIGHT }
+                        : undefined
+                    }
+                  >
                     {columnTasks.map(task => (
                       <TaskCard
                         active={selectedTask?.id === task.id}
@@ -367,6 +542,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                           setDraggingTaskId(task.id)
                         }}
                         onOpenDetail={() => openTaskDetail(task.id)}
+                        nowSeconds={nowSeconds}
                         onSelect={() => setSelectedTaskId(task.id)}
                         task={task}
                       />
@@ -551,6 +727,20 @@ function TaskDetailDialog({
   const [savingComment, setSavingComment] = useState(false)
   const [savingCommentEdit, setSavingCommentEdit] = useState(false)
   const [savingTask, setSavingTask] = useState(false)
+  const activeTaskId = activeTask?.id ?? null
+  const timeline = useMemo(() => buildTimeline(detail), [detail])
+
+  useEffect(() => {
+    if (!open || !activeTaskId) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      void onRefreshDetail(activeTaskId).catch(() => undefined)
+    }, KANBAN_FAST_POLL_MS)
+
+    return () => window.clearInterval(timer)
+  }, [activeTaskId, onRefreshDetail, open])
 
   useEffect(() => {
     if (!open || !activeTask) {
@@ -590,7 +780,7 @@ function TaskDetailDialog({
       status: editForm.status,
       tenant: editForm.tenant.trim() || null,
       title: editForm.title.trim(),
-      workspace_kind: activeTask.workspace_kind || 'repo',
+      workspace_kind: kanbanWorkspaceKind(activeTask.workspace_kind),
       workspace_path: editForm.workspace_path.trim() || null
     }
 
@@ -767,6 +957,15 @@ function TaskDetailDialog({
                 <Meta label="Run" value={activeTask.current_run_id ? String(activeTask.current_run_id) : '—'} />
               </div>
 
+              <AccordionBlock defaultOpen title={`Atividade recente (${timeline.length})`}>
+                <div className="space-y-2">
+                  {timeline.slice(0, 8).map(item => (
+                    <TimelineCard item={item} key={item.key} />
+                  ))}
+                  {!timeline.length && <div className="text-xs text-(--ui-text-quaternary)">Sem atividade ainda.</div>}
+                </div>
+              </AccordionBlock>
+
               {activeTask.result && (
                 <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
                   <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">
@@ -885,6 +1084,7 @@ function TaskDetailDialog({
 function TaskCard({
   active,
   dragging,
+  nowSeconds,
   onDragEnd,
   onDragStart,
   onOpenDetail,
@@ -893,12 +1093,15 @@ function TaskCard({
 }: {
   active: boolean
   dragging: boolean
+  nowSeconds: number
   onDragEnd: () => void
   onDragStart: (event: React.DragEvent<HTMLDivElement>) => void
   onOpenDetail: () => void
   onSelect: () => void
   task: KanbanTask
 }) {
+  const signal = latestTaskSignal(task, nowSeconds)
+
   return (
     <div
       className={cn(
@@ -936,6 +1139,14 @@ function TaskCard({
       <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[0.68rem] text-(--ui-text-tertiary)">
         <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5">{task.assignee || 'unassigned'}</span>
         {task.tenant && <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5">{task.tenant}</span>}
+        {task.current_run_id && (
+          <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5 text-(--ui-cyan)">
+            run {task.current_run_id}
+          </span>
+        )}
+        {signal && (
+          <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5 text-(--ui-accent)">{signal}</span>
+        )}
         {task.consecutive_failures > 0 && (
           <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5 text-(--ui-red)">
             ⚠ {task.consecutive_failures}
@@ -983,6 +1194,35 @@ function AccordionBlock({
       </button>
       {open && <div className="border-t border-(--ui-stroke-secondary) p-3">{children}</div>}
     </section>
+  )
+}
+
+function TimelineCard({ item }: { item: TimelineItem }) {
+  const payload = formatPayload(item.payload)
+
+  return (
+    <div
+      className={cn(
+        'rounded-lg border bg-(--ui-bg-chrome) p-3 text-xs',
+        item.type === 'failure' ? 'border-(--ui-red)' : 'border-(--ui-stroke-secondary)'
+      )}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 text-(--ui-text-primary)">
+        <span className={item.type === 'failure' ? 'text-(--ui-red)' : undefined}>{item.label}</span>
+        <span className="text-(--ui-text-quaternary)">{formatTime(item.time)}</span>
+      </div>
+      {item.meta && <div className="mt-1 text-(--ui-text-tertiary)">{item.meta}</div>}
+      {item.body && (
+        <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words text-(--ui-text-secondary)">
+          {item.body}
+        </pre>
+      )}
+      {payload && (
+        <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-(--ui-bg-secondary) p-2 text-(--ui-text-tertiary)">
+          {payload}
+        </pre>
+      )}
+    </div>
   )
 }
 
