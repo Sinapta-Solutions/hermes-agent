@@ -1668,17 +1668,21 @@ class SessionDB:
         params = []
 
         if not include_children:
-            # Show root sessions and branch sessions (whose parent ended with
-            # end_reason='branched' before the child was created), while still
-            # hiding sub-agent runs and compression continuations (which also
-            # carry a parent_session_id but were spawned while the parent was
-            # still live — i.e., started_at < parent.ended_at).
+            # Show root sessions, explicit branches, and titled child rows that
+            # already have messages. Auto-compressed Desktop/TUI continuations
+            # can become titled user-facing history entries; hiding every child
+            # collapses dozens of real sessions into one sidebar row. Untitled
+            # children stay hidden as delegate/background noise.
             where_clauses.append(
                 "(s.parent_session_id IS NULL"
                 " OR EXISTS (SELECT 1 FROM sessions p"
                 "            WHERE p.id = s.parent_session_id"
                 "            AND p.end_reason = 'branched'"
-                "            AND s.started_at >= p.ended_at))"
+                "            AND s.started_at >= p.ended_at)"
+                " OR (s.parent_session_id IS NOT NULL"
+                "     AND s.title IS NOT NULL"
+                "     AND TRIM(s.title) <> ''"
+                "     AND COALESCE(s.message_count, 0) > 0))"
             )
 
         if source:
@@ -1837,6 +1841,13 @@ class SessionDB:
                 if s.get("end_reason") != "compression":
                     projected.append(s)
                     continue
+                if (
+                    s.get("parent_session_id")
+                    and s.get("title")
+                    and (s.get("message_count") or 0) > 0
+                ):
+                    projected.append(s)
+                    continue
                 tip_id = self.get_compression_tip(s["id"])
                 if tip_id == s["id"]:
                     projected.append(s)
@@ -1857,7 +1868,15 @@ class SessionDB:
                         merged[key] = tip_row[key]
                 merged["_lineage_root_id"] = s["id"]
                 projected.append(merged)
-            sessions = projected
+            deduped = []
+            seen_ids = set()
+            for s in projected:
+                sid = s.get("id")
+                if sid in seen_ids:
+                    continue
+                seen_ids.add(sid)
+                deduped.append(s)
+            sessions = deduped
 
         return sessions
 
@@ -3170,6 +3189,19 @@ class SessionDB:
         callers can pass ``include_children=False`` and
         ``project_compression_tips=True`` to match ``list_sessions_rich``.
         """
+        if project_compression_tips and not include_children:
+            return len(
+                self.list_sessions_rich(
+                    source=source,
+                    limit=1_000_000,
+                    include_children=False,
+                    min_message_count=min_message_count,
+                    project_compression_tips=True,
+                    include_archived=include_archived,
+                    archived_only=archived_only,
+                )
+            )
+
         where_clauses = []
         params = []
 
