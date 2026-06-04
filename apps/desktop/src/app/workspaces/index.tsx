@@ -26,10 +26,11 @@ interface WorkspacesViewProps {
   setStatusbarItemGroup?: SetStatusbarItemGroup
 }
 
-type WorkspaceFormState = Record<'board_id' | 'description' | 'name' | 'repo_path' | 'vault_path', string>
+type WorkspaceFormState = Record<'board_id' | 'branch' | 'description' | 'name' | 'repo_path' | 'vault_path', string>
 
 const EMPTY_FORM: WorkspaceFormState = {
   board_id: '',
+  branch: '',
   description: '',
   name: '',
   repo_path: '',
@@ -38,6 +39,7 @@ const EMPTY_FORM: WorkspaceFormState = {
 
 const JURISHUB_PRESET: WorkspaceFormState = {
   board_id: 'JUR',
+  branch: 'dev',
   description: 'Workspace operacional do JurisHUB: repo, vault, agentes e tarefas sob coordenação da M.i.A.',
   name: 'JurisHUB',
   repo_path: 'D:\\2. JurisHUB\\app',
@@ -47,6 +49,7 @@ const JURISHUB_PRESET: WorkspaceFormState = {
 function compactPayload(form: WorkspaceFormState): WorkspacePayload {
   return {
     board_id: form.board_id.trim() || null,
+    branch: form.branch.trim() || null,
     description: form.description.trim() || null,
     name: form.name.trim(),
     repo_path: form.repo_path.trim() || null,
@@ -57,6 +60,7 @@ function compactPayload(form: WorkspaceFormState): WorkspacePayload {
 function hydrateForm(workspace: Workspace): WorkspaceFormState {
   return {
     board_id: workspace.board_id ?? '',
+    branch: workspace.branch ?? '',
     description: workspace.description ?? '',
     name: workspace.name,
     repo_path: workspace.repo_path ?? '',
@@ -219,6 +223,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
                   <div className="mt-2 flex gap-2 text-[0.7rem] text-(--ui-text-tertiary)">
                     <span className={status?.repo_exists ? 'text-primary' : ''}>repo {status?.repo_exists ? 'ok' : 'missing'}</span>
                     <span className={status?.vault_exists ? 'text-primary' : ''}>vault {status?.vault_exists ? 'ok' : 'missing'}</span>
+                    {workspace.branch && <span>base {workspace.branch}</span>}
                   </div>
                 </button>
               )
@@ -246,6 +251,9 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
                 <Field className="md:col-span-2" label="Repository path">
                   <Input onChange={event => setForm(prev => ({ ...prev, repo_path: event.target.value }))} value={form.repo_path} />
                 </Field>
+                <Field label="Base branch/ref for Kanban worktrees">
+                  <Input onChange={event => setForm(prev => ({ ...prev, branch: event.target.value }))} placeholder="auto, dev, main, origin/main" value={form.branch} />
+                </Field>
                 <Field className="md:col-span-2" label="Vault / notes path">
                   <Input onChange={event => setForm(prev => ({ ...prev, vault_path: event.target.value }))} value={form.vault_path} />
                 </Field>
@@ -271,6 +279,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
                     <div className="mt-1 text-xs text-(--ui-text-tertiary)">{selected.id}</div>
                   </div>
                   <StatusLine label="Board" value={selected.board_id || 'not configured'} />
+                  <StatusLine label="Kanban base ref" value={selected.branch || 'auto on save'} />
                   <StatusLine label="Repo" ok={activeStatus?.repo_exists} value={selected.repo_path || 'not configured'} />
                   <StatusLine label="Vault" ok={activeStatus?.vault_exists} value={selected.vault_path || 'not configured'} />
                   <StatusLine label="Description" value={selected.description || 'not configured'} />

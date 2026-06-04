@@ -55,9 +55,9 @@ const EMPTY_FORM: TaskFormState = {
   body: '',
   priority: '0',
   status: 'ready',
-  tenant: 'jur',
+  tenant: '',
   title: '',
-  workspace_path: 'D:\\2. JurisHUB\\app'
+  workspace_path: ''
 }
 
 const STATUSES: Array<{ accent: string; description: string; label: string; value: KanbanStatus }> = [
@@ -243,6 +243,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     () => boards.find(board => board.slug === selectedBoardSlug) ?? boards[0] ?? null,
     [boards, selectedBoardSlug]
   )
+  const boardTenant = selectedBoard?.slug ? selectedBoard.slug.toLowerCase() : ''
 
   const selectedTask = useMemo(() => tasks.find(task => task.id === selectedTaskId) ?? null, [selectedTaskId, tasks])
   const detailTask = useMemo(() => tasks.find(task => task.id === detailTaskId) ?? null, [detailTaskId, tasks])
@@ -354,6 +355,17 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     setDetailTaskId(taskId)
   }, [])
 
+  const openCreateTask = useCallback(() => {
+    setForm(prev => ({
+      ...EMPTY_FORM,
+      assignee: prev.assignee,
+      priority: prev.priority || EMPTY_FORM.priority,
+      status: prev.status || EMPTY_FORM.status,
+      tenant: boardTenant
+    }))
+    setCreateOpen(true)
+  }, [boardTenant])
+
   const submit = async () => {
     if (!selectedBoard) {
       notify({ title: 'Kanban', message: 'Nenhum board selecionado' })
@@ -369,16 +381,19 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
 
     setSaving(true)
 
+    const manualWorkdir = form.workspace_path.trim()
+    const workspaceKind = manualWorkdir ? 'dir' : selectedBoard.default_workdir ? 'worktree' : 'scratch'
+
     try {
       const task = await createKanbanTask(selectedBoard.slug, {
         assignee: form.assignee.trim() || null,
         body: form.body.trim() || null,
         priority: Number.parseInt(form.priority, 10) || 0,
         status: form.status,
-        tenant: form.tenant.trim() || null,
+        tenant: form.tenant.trim() || boardTenant || null,
         title: form.title.trim(),
-        workspace_kind: form.workspace_path.trim() ? 'dir' : 'scratch',
-        workspace_path: form.workspace_path.trim() || selectedBoard.default_workdir || null
+        workspace_kind: workspaceKind,
+        workspace_path: manualWorkdir || null
       })
 
       setForm(prev => ({ ...prev, body: '', title: '' }))
@@ -446,7 +461,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
               </option>
             ))}
           </select>
-          <Button onClick={() => setCreateOpen(true)} type="button">
+          <Button onClick={openCreateTask} type="button">
             <Codicon name="add" /> Novo card
           </Button>
           <div className="hidden text-right text-[0.68rem] leading-tight text-(--ui-text-quaternary) md:block">
@@ -534,6 +549,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                         active={selectedTask?.id === task.id}
                         dragging={draggingTaskId === task.id}
                         key={task.id}
+                        nowSeconds={nowSeconds}
                         onDragEnd={() => setDraggingTaskId(null)}
                         onDragStart={event => {
                           event.dataTransfer.effectAllowed = 'move'
@@ -542,7 +558,6 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                           setDraggingTaskId(task.id)
                         }}
                         onOpenDetail={() => openTaskDetail(task.id)}
-                        nowSeconds={nowSeconds}
                         onSelect={() => setSelectedTaskId(task.id)}
                         task={task}
                       />
@@ -562,6 +577,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
 
       <CreateTaskDialog
         assignees={assignees}
+        board={selectedBoard}
         form={form}
         onOpenChange={setCreateOpen}
         onSubmit={() => void submit()}
@@ -574,18 +590,18 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
         assignees={assignees}
         boardSlug={selectedBoard?.slug ?? null}
         detail={detailTask ? detail : null}
-        onTaskArchived={archivedTaskId => {
-          setTasks(current => current.filter(item => item.id !== archivedTaskId))
-          setDetail(current => (current?.task.id === archivedTaskId ? null : current))
-          setDetailTaskId(current => (current === archivedTaskId ? null : current))
-          setSelectedTaskId(current => (current === archivedTaskId ? null : current))
-        }}
         onOpenChange={open => {
           if (!open) {
             setDetailTaskId(null)
           }
         }}
         onRefreshDetail={loadTaskDetail}
+        onTaskArchived={archivedTaskId => {
+          setTasks(current => current.filter(item => item.id !== archivedTaskId))
+          setDetail(current => (current?.task.id === archivedTaskId ? null : current))
+          setDetailTaskId(current => (current === archivedTaskId ? null : current))
+          setSelectedTaskId(current => (current === archivedTaskId ? null : current))
+        }}
         onTaskUpdated={updated => {
           setTasks(current => current.map(item => (item.id === updated.id ? updated : item)))
           setDetail(current => (current?.task.id === updated.id ? { ...current, task: updated } : current))
@@ -599,6 +615,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
 
 function CreateTaskDialog({
   assignees,
+  board,
   form,
   onOpenChange,
   onSubmit,
@@ -607,6 +624,7 @@ function CreateTaskDialog({
   setForm
 }: {
   assignees: string[]
+  board: KanbanBoard | null
   form: TaskFormState
   onOpenChange: (open: boolean) => void
   onSubmit: () => void
@@ -621,6 +639,14 @@ function CreateTaskDialog({
           <DialogTitle className="text-(--ui-text-primary)">Novo card</DialogTitle>
           <DialogDescription>Cria uma tarefa scoped para o dispatcher da M.i.A.</DialogDescription>
         </DialogHeader>
+        {board && (
+          <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-3 py-2 text-xs text-(--ui-text-tertiary)">
+            <div className="font-medium text-(--ui-text-secondary)">Workspace do board: {board.name}</div>
+            <div className="mt-1 break-all">Repo fonte: {board.default_workdir || 'não configurado'}</div>
+            <div>Base worktree: {board.worktree_base_ref || 'HEAD/auto'}</div>
+            <div className="mt-1 text-(--ui-text-quaternary)">Sem workdir manual, o card cria um git worktree isolado a partir desse workspace.</div>
+          </div>
+        )}
         <div className="grid gap-3">
           <Field label="Título">
             <Input
@@ -683,10 +709,11 @@ function CreateTaskDialog({
               />
             </Field>
           </div>
-          <Field label="Workdir">
+          <Field label="Workdir manual (opcional)">
             <Input
               className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
               onChange={event => setForm(prev => ({ ...prev, workspace_path: event.target.value }))}
+              placeholder="vazio = worktree automático do workspace selecionado"
               value={form.workspace_path}
             />
           </Field>

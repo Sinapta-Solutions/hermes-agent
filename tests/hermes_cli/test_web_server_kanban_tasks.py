@@ -40,6 +40,46 @@ def test_desktop_kanban_task_create_defaults_to_dispatchable_scratch_workspace(c
     assert task["workspace_kind"] == "scratch"
 
 
+def test_desktop_workspace_syncs_repo_and_base_ref_to_kanban_board(client: TestClient, tmp_path):
+    response = client.post(
+        "/api/workspaces",
+        json={
+            "board_id": "JUR",
+            "branch": "dev",
+            "description": "Workspace operacional JurisHUB",
+            "name": "JurisHUB",
+            "repo_path": str(tmp_path),
+            "vault_path": str(tmp_path / "vault"),
+        },
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 201
+    workspace = response.json()["workspace"]
+    assert workspace["branch"] == "dev"
+
+    boards_response = client.get("/api/kanban/boards", headers=_auth_headers())
+    assert boards_response.status_code == 200
+    boards = boards_response.json()["boards"]
+    board = next(item for item in boards if item["slug"] == "jur")
+    assert board["workspace_id"] == workspace["id"]
+    assert board["default_workdir"] == str(tmp_path)
+    assert board["worktree_base_ref"] == "dev"
+
+    # The workspace sync must create a dispatcher-ready board DB, not only
+    # board.json metadata, so task operations work immediately from Desktop.
+    tasks_response = client.get("/api/kanban/boards/jur/tasks", headers=_auth_headers())
+    assert tasks_response.status_code == 200
+
+    task_response = client.post(
+        "/api/kanban/boards/jur/tasks",
+        json={"title": "worktree card", "workspace_kind": "worktree"},
+        headers=_auth_headers(),
+    )
+    assert task_response.status_code == 201
+    assert task_response.json()["task"]["workspace_kind"] == "worktree"
+
+
 def test_desktop_kanban_task_rejects_invalid_workspace_kind(client: TestClient):
     kb.create_board("api-test-invalid")
 

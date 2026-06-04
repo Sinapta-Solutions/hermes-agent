@@ -1569,6 +1569,53 @@ def _workspace_text(value: Any, *, max_len: int = 4096) -> Optional[str]:
     return text[:max_len]
 
 
+def _git_output(repo_path: str, args: List[str]) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    value = (proc.stdout or "").strip()
+    return value or None
+
+
+def _detect_workspace_base_ref(repo_path: Optional[str]) -> Optional[str]:
+    """Best-effort base ref for Kanban worktrees linked to a workspace."""
+    if not repo_path:
+        return None
+    path = Path(repo_path).expanduser()
+    if not path.exists():
+        return None
+
+    origin_head = _git_output(str(path), ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+    if origin_head:
+        return origin_head
+
+    current = _git_output(str(path), ["branch", "--show-current"])
+    if current:
+        return current
+
+    for candidate in ("dev", "main", "master"):
+        if _git_output(str(path), ["rev-parse", "--verify", f"{candidate}^{{commit}}"]):
+            return candidate
+        remote_ref = f"origin/{candidate}"
+        if _git_output(str(path), ["rev-parse", "--verify", f"{remote_ref}^{{commit}}"]):
+            return remote_ref
+    return None
+
+
+def _workspace_branch_from_body(body: Dict[str, Any], repo_path: Optional[str]) -> Optional[str]:
+    explicit = _workspace_text(body.get("branch"), max_len=160)
+    return explicit or _detect_workspace_base_ref(repo_path)
+
+
 def _workspace_response(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],
@@ -1632,6 +1679,17 @@ def _sync_workspace_board_metadata(row: sqlite3.Row) -> None:
     if not slug:
         return
 
+    from hermes_cli import kanban_db
+
+    # Ensure the linked board is not just display metadata. Desktop-created
+    # workspaces must leave a dispatcher-ready Kanban board with a real DB.
+    kanban_db.create_board(
+        slug,
+        name=row["name"],
+        description=row["description"] or "",
+        default_workdir=row["repo_path"],
+        worktree_base_ref=row["branch"],
+    )
     board_dir = _board_dir(slug)
     board_dir.mkdir(parents=True, exist_ok=True)
     meta = _read_board_meta(slug) or {
@@ -1679,20 +1737,23 @@ async def create_workspace(request: Request):
     if not re.match(r"^[A-Za-z0-9_.:-]{3,80}$", workspace_id):
         return _workspace_error("Invalid workspace ID", code="invalid_workspace_id", status=400)
 
+    repo_path = _workspace_text(body.get("repo_path"), max_len=2048)
+    branch = _workspace_branch_from_body(body, repo_path)
     now = _workspace_now()
     conn = _ensure_workspaces_db()
     try:
         conn.execute(
             """
-            INSERT INTO workspaces (id, name, repo_path, vault_path, board_id, description, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO workspaces (id, name, repo_path, vault_path, board_id, branch, description, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace_id,
                 name,
-                _workspace_text(body.get("repo_path"), max_len=2048),
+                repo_path,
                 _workspace_text(body.get("vault_path"), max_len=2048),
                 _workspace_text(body.get("board_id"), max_len=160),
+                branch,
                 _workspace_text(body.get("description"), max_len=4096),
                 now,
                 now,
@@ -1704,6 +1765,7 @@ async def create_workspace(request: Request):
         return _workspace_error(f"Workspace already exists: {workspace_id}", code="workspace_exists", status=409)
 
     row = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+    _sync_workspace_board_metadata(row)
     return JSONResponse(status_code=201, content={"object": "hermes.workspace", "workspace": _workspace_response(row)})
 
 
@@ -1711,7 +1773,7 @@ async def create_workspace(request: Request):
 async def patch_workspace(workspace_id: str, request: Request):
     _get_workspace_row(workspace_id)
     body = await _workspace_body(request)
-    allowed = {"name", "repo_path", "vault_path", "board_id", "description"}
+    allowed = {"name", "repo_path", "vault_path", "board_id", "branch", "description"}
     unknown = sorted(set(body) - allowed)
     if unknown:
         return _workspace_error(
@@ -1724,10 +1786,14 @@ async def patch_workspace(workspace_id: str, request: Request):
 
     fields = []
     values: List[Any] = []
-    for key in ("name", "repo_path", "vault_path", "board_id", "description"):
+    if "repo_path" in body and "branch" not in body:
+        detected_branch = _detect_workspace_base_ref(_workspace_text(body.get("repo_path"), max_len=2048))
+        if detected_branch:
+            body["branch"] = detected_branch
+    for key in ("name", "repo_path", "vault_path", "board_id", "branch", "description"):
         if key in body:
             fields.append(f"{key} = ?")
-            max_len = 160 if key in {"name", "board_id"} else 2048 if key.endswith("_path") else 4096
+            max_len = 160 if key in {"name", "board_id", "branch"} else 2048 if key.endswith("_path") else 4096
             values.append(_workspace_text(body.get(key), max_len=max_len))
 
     conn = _ensure_workspaces_db()
@@ -1740,6 +1806,7 @@ async def patch_workspace(workspace_id: str, request: Request):
         conn.commit()
 
     row = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+    _sync_workspace_board_metadata(row)
     return {"object": "hermes.workspace", "workspace": _workspace_response(row)}
 
 
@@ -1844,6 +1911,8 @@ def _read_board_meta(slug: str) -> Optional[Dict[str, Any]]:
     raw.setdefault("icon", "◫")
     raw.setdefault("color", "#cba6f7")
     raw.setdefault("default_workdir", None)
+    raw.setdefault("workspace_id", None)
+    raw.setdefault("worktree_base_ref", None)
     raw["archived"] = bool(raw.get("archived"))
     raw["db_path"] = str(_board_db_path(slug))
     return raw

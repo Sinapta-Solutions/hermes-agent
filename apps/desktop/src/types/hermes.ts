@@ -1,6 +1,7 @@
 
 export interface Workspace {
   board_id?: null | string
+  branch?: null | string
   created_at: string
   description?: null | string
   id: string
@@ -22,6 +23,7 @@ export interface WorkspaceMutationResponse {
 
 export interface WorkspacePayload {
   board_id?: null | string
+  branch?: null | string
   description?: null | string
   name: string
   repo_path?: null | string
@@ -67,6 +69,8 @@ export interface KanbanBoard {
   slug: string
   task_counts: Record<string, number>
   task_total: number
+  workspace_id?: null | string
+  worktree_base_ref?: null | string
 }
 
 export interface KanbanBoardsResponse {
