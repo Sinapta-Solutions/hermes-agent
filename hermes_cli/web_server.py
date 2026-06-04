@@ -1794,7 +1794,8 @@ def workspace_events(workspace_id: str, limit: int = 25):
 # Native M.i.A Kanban — dashboard/Desktop API surface
 # ---------------------------------------------------------------------------
 
-_KANBAN_STATUSES = ("triage", "todo", "scheduled", "ready", "running", "blocked", "done")
+_KANBAN_ACTIVE_STATUSES = ("triage", "todo", "scheduled", "ready", "running", "blocked", "done")
+_KANBAN_STATUSES = (*_KANBAN_ACTIVE_STATUSES, "archived")
 _KANBAN_WORKSPACE_KINDS = ("scratch", "dir", "worktree")
 
 
@@ -1914,14 +1915,18 @@ def list_kanban_boards():
             meta = _read_board_meta(child.name)
             if not meta or meta.get("archived"):
                 continue
-            counts = {status: 0 for status in _KANBAN_STATUSES}
+            counts = {status: 0 for status in _KANBAN_ACTIVE_STATUSES}
             db_path = _board_db_path(child.name)
             if db_path.exists():
                 try:
                     conn = _connect_kanban_board(child.name)
                     try:
-                        for row in conn.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status"):
-                            counts[row["status"]] = row["count"]
+                        for row in conn.execute(
+                            "SELECT status, COUNT(*) AS count FROM tasks "
+                            "WHERE status != 'archived' GROUP BY status"
+                        ):
+                            if row["status"] in counts:
+                                counts[row["status"]] = row["count"]
                     finally:
                         conn.close()
                 except Exception:
@@ -1936,9 +1941,12 @@ def list_kanban_boards():
 def list_kanban_tasks(slug: str):
     conn = _connect_kanban_board(slug)
     try:
-        rows = conn.execute("SELECT * FROM tasks ORDER BY priority DESC, created_at DESC").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE status != 'archived' "
+            "ORDER BY priority DESC, created_at DESC"
+        ).fetchall()
         tasks = [_task_response(row) for row in rows]
-        counts = {status: 0 for status in _KANBAN_STATUSES}
+        counts = {status: 0 for status in _KANBAN_ACTIVE_STATUSES}
         for task in tasks:
             counts[task["status"]] = counts.get(task["status"], 0) + 1
         return {"object": "list", "board": _read_board_meta(slug), "tasks": tasks, "task_counts": counts}
@@ -1958,7 +1966,7 @@ async def create_kanban_task(slug: str, request: Request):
     assignee = str(body.get("assignee") or "").strip() or None
     task_body = str(body.get("body") or "").strip() or None
     status = str(body.get("status") or "ready").strip().lower()
-    if status not in _KANBAN_STATUSES:
+    if status not in _KANBAN_ACTIVE_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid task status")
     try:
         priority = int(body.get("priority") or 0)
@@ -2198,6 +2206,13 @@ async def update_kanban_task(slug: str, task_id: str, request: Request):
             status = str(body.get("status") or "").strip().lower()
             if status not in _KANBAN_STATUSES:
                 raise HTTPException(status_code=400, detail="Invalid task status")
+            if status == "archived":
+                from hermes_cli import kanban_db
+
+                if not kanban_db.archive_task(conn, task_id):
+                    raise HTTPException(status_code=409, detail="Kanban task could not be archived")
+                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                return {"object": "hermes.kanban.task", "task": _task_response(row)}
             updates["status"] = status
             now = int(time.time())
             if status == "running" and not task["started_at"]:
