@@ -44,6 +44,8 @@ import {
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
 
+import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
+
 import {
   canUseRawKanbanStatusDrop,
   semanticStepStatusForKanbanDrop,
@@ -52,8 +54,6 @@ import {
   workflowProgress,
   workflowRouteForTask
 } from './workflow'
-
-import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
 interface KanbanViewProps {
   setStatusbarItemGroup?: SetStatusbarItemGroup
@@ -564,9 +564,11 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
       try {
         const semanticStatus = semanticStepStatusForKanbanDrop(status)
         const currentStep = workflowCurrentStepForTask(task)
+
         const updated = semanticStatus && currentStep
           ? await updateKanbanWorkflowStep(selectedBoard.slug, taskId, currentStep.id, { status: semanticStatus })
           : await updateKanbanTask(selectedBoard.slug, taskId, { status })
+
         setTasks(current => current.map(item => (item.id === updated.id ? updated : item)))
         setDetail(current => (current?.task.id === updated.id ? { ...current, task: updated } : current))
       } catch (error) {
@@ -613,6 +615,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
           <Button
             onClick={() => {
               void refresh()
+
               if (selectedBoard?.slug) {
                 void Promise.all([refreshTasks(selectedBoard.slug), refreshDispatcherStatus(selectedBoard.slug)]).catch(error =>
                   notifyError(error, 'Failed to refresh Kanban')
@@ -1213,6 +1216,7 @@ function TaskDetailDialog({
 
     try {
       const maxRetries = workflowStepForm.max_retries.trim()
+
       const updated = await createKanbanWorkflowStep(boardSlug, activeTask.id, {
         assignee: workflowStepForm.assignee.trim() || null,
         depends_on: splitWorkflowFormList(workflowStepForm.depends_on),
