@@ -1,5 +1,6 @@
 import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -19,23 +20,38 @@ import {
   createKanbanTask,
   createKanbanTaskComment,
   createKanbanWorkflowEvidence,
+  createKanbanWorkflowStep,
   getKanbanAssignees,
   getKanbanBoards,
+  getKanbanDispatcherStatus,
   getKanbanTaskDetail,
   getKanbanTasks,
   type KanbanBoard,
   type KanbanComment,
+  type KanbanDispatcherStatusResponse,
   type KanbanEvent,
   type KanbanFailure,
   type KanbanStatus,
   type KanbanTask,
   type KanbanTaskDetailResponse,
   type KanbanTaskUpdatePayload,
+  type KanbanWorkflowStepStatus,
+  type KanbanWorkflowStepUpdatePayload,
   updateKanbanTask,
-  updateKanbanTaskComment
+  updateKanbanTaskComment,
+  updateKanbanWorkflowStep
 } from '@/hermes'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
+
+import {
+  canUseRawKanbanStatusDrop,
+  semanticStepStatusForKanbanDrop,
+  workflowCurrentStepForTask,
+  workflowEvidencePreview,
+  workflowProgress,
+  workflowRouteForTask
+} from './workflow'
 
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
@@ -53,6 +69,16 @@ type TaskFormState = {
   workspace_path: string
 }
 
+type WorkflowStepFormState = {
+  assignee: string
+  depends_on: string
+  id: string
+  max_retries: string
+  title: string
+  type: string
+  validation_criteria: string
+}
+
 const EMPTY_FORM: TaskFormState = {
   assignee: '',
   body: '',
@@ -62,6 +88,18 @@ const EMPTY_FORM: TaskFormState = {
   title: '',
   workspace_path: ''
 }
+
+const EMPTY_WORKFLOW_STEP_FORM: WorkflowStepFormState = {
+  assignee: '',
+  depends_on: '',
+  id: '',
+  max_retries: '1',
+  title: '',
+  type: 'implementation',
+  validation_criteria: ''
+}
+
+const WORKFLOW_STEP_STATUSES: KanbanWorkflowStepStatus[] = ['pending', 'ready', 'running', 'passed', 'blocked', 'failed']
 
 const STATUSES: Array<{ accent: string; description: string; label: string; value: KanbanStatus }> = [
   { value: 'triage', label: 'Triage', description: 'Entrada bruta para especificar', accent: 'var(--ui-orange)' },
@@ -233,40 +271,23 @@ function formatPayload(value: KanbanEvent['payload'] | Record<string, unknown> |
   }
 }
 
-function workflowRouteForTask(task: KanbanTask | null | undefined) {
-  return task?.workflowRoute ?? task?.workflow_route ?? null
-}
-
-function workflowStepsForTask(task: KanbanTask | null | undefined) {
-  return workflowRouteForTask(task)?.steps ?? []
-}
-
-function workflowCurrentStepForTask(task: KanbanTask | null | undefined) {
-  const route = workflowRouteForTask(task)
-  const steps = route?.steps ?? []
-  const currentId = route?.current_step_id ?? task?.current_step_key ?? null
-
-  return steps.find(step => step.id === currentId) ?? steps.find(step => ['ready', 'running', 'blocked'].includes(step.status)) ?? null
-}
-
-function workflowProgress(task: KanbanTask | null | undefined) {
-  const steps = workflowStepsForTask(task)
-  const passed = steps.filter(step => step.status === 'passed').length
-
-  return { passed, total: steps.length }
-}
-
-function workflowEvidencePreview(step: ReturnType<typeof workflowCurrentStepForTask>) {
-  const last = step?.evidence?.at(-1)
-
-  return last?.text || last?.kind || null
-}
-
 function taskCount(tasks: KanbanTask[], status: KanbanStatus) {
   return tasks.filter(task => task.status === status).length
 }
 
+function splitWorkflowFormList(value: string) {
+  return value
+    .split(/[\n,]/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
 export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const query = useMemo(() => new URLSearchParams(location.search), [location.search])
+  const requestedBoardSlug = query.get('board')
+  const requestedTaskId = query.get('task')
   const [assignees, setAssignees] = useState<string[]>([])
   const [boards, setBoards] = useState<KanbanBoard[]>([])
   const [selectedBoardSlug, setSelectedBoardSlug] = useState<string | null>(null)
@@ -274,6 +295,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
   const [detail, setDetail] = useState<KanbanTaskDetailResponse | null>(null)
+  const [dispatcherStatus, setDispatcherStatus] = useState<KanbanDispatcherStatusResponse | null>(null)
   const [form, setForm] = useState<TaskFormState>(EMPTY_FORM)
   const [createOpen, setCreateOpen] = useState(false)
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null)
@@ -289,13 +311,58 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
 
   const boardTenant = selectedBoard?.slug ? selectedBoard.slug.toLowerCase() : ''
 
+  const updateRouteQuery = useCallback(
+    (next: { board?: null | string; task?: null | string }, replace = true) => {
+      const params = new URLSearchParams(location.search)
+
+      for (const [key, value] of Object.entries(next)) {
+        if (value) {
+          params.set(key, value)
+        } else {
+          params.delete(key)
+        }
+      }
+
+      const search = params.toString()
+      navigate({ pathname: '/kanban', search: search ? `?${search}` : '' }, { replace })
+    },
+    [location.search, navigate]
+  )
+
+  const selectBoard = useCallback(
+    (slug: string) => {
+      setSelectedBoardSlug(slug)
+      setSelectedTaskId(null)
+      setDetailTaskId(null)
+      updateRouteQuery({ board: slug, task: null })
+    },
+    [updateRouteQuery]
+  )
+
   const selectedTask = useMemo(() => tasks.find(task => task.id === selectedTaskId) ?? null, [selectedTaskId, tasks])
   const detailTask = useMemo(() => tasks.find(task => task.id === detailTaskId) ?? null, [detailTaskId, tasks])
 
   const refreshBoards = useCallback(async () => {
     const next = await getKanbanBoards()
     setBoards(next)
-    setSelectedBoardSlug(current => current ?? next.find(board => board.slug === 'jur')?.slug ?? next[0]?.slug ?? null)
+    setSelectedBoardSlug(current =>
+      current ?? next.find(board => board.slug === requestedBoardSlug)?.slug ?? next.find(board => board.slug === 'jur')?.slug ?? next[0]?.slug ?? null
+    )
+  }, [requestedBoardSlug])
+
+  useEffect(() => {
+    if (!requestedBoardSlug || !boards.some(board => board.slug === requestedBoardSlug)) {
+      return
+    }
+
+    setSelectedBoardSlug(requestedBoardSlug)
+  }, [boards, requestedBoardSlug])
+
+  const refreshDispatcherStatus = useCallback(async (slug: string) => {
+    const next = await getKanbanDispatcherStatus(slug)
+    setDispatcherStatus(next)
+
+    return next
   }, [])
 
   const refreshTasks = useCallback(async (slug: string) => {
@@ -328,8 +395,10 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
       return
     }
 
-    void refreshTasks(selectedBoard.slug).catch(error => notifyError(error, 'Failed to load Kanban tasks'))
-  }, [refreshTasks, selectedBoard?.slug])
+    void Promise.all([refreshTasks(selectedBoard.slug), refreshDispatcherStatus(selectedBoard.slug)]).catch(error =>
+      notifyError(error, 'Failed to load Kanban tasks')
+    )
+  }, [refreshDispatcherStatus, refreshTasks, selectedBoard?.slug])
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowSeconds(Math.floor(Date.now() / 1000)), 1000)
@@ -350,7 +419,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
       }
 
       pollInFlightRef.current = true
-      void refreshTasks(selectedBoard.slug)
+      void Promise.all([refreshTasks(selectedBoard.slug), refreshDispatcherStatus(selectedBoard.slug)])
         .catch(error => notifyError(error, 'Failed to auto-refresh Kanban tasks'))
         .finally(() => {
           pollInFlightRef.current = false
@@ -358,7 +427,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     }, intervalMs)
 
     return () => window.clearInterval(timer)
-  }, [refreshTasks, selectedBoard?.slug, tasks])
+  }, [refreshDispatcherStatus, refreshTasks, selectedBoard?.slug, tasks])
 
   const loadTaskDetail = useCallback(
     async (taskId: string) => {
@@ -387,6 +456,15 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   }, [detailTaskId, loadTaskDetail, selectedBoard?.slug])
 
   useEffect(() => {
+    if (!requestedTaskId || !tasks.some(task => task.id === requestedTaskId)) {
+      return
+    }
+
+    setSelectedTaskId(requestedTaskId)
+    setDetailTaskId(requestedTaskId)
+  }, [requestedTaskId, tasks])
+
+  useEffect(() => {
     setStatusbarItemGroup?.('kanban', [
       { id: 'kanban-board', label: selectedBoard ? `Board ${selectedBoard.slug}` : 'Kanban' },
       { id: 'kanban-count', label: `${tasks.length} tasks` }
@@ -395,10 +473,14 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     return () => setStatusbarItemGroup?.('kanban', [])
   }, [selectedBoard, setStatusbarItemGroup, tasks.length])
 
-  const openTaskDetail = useCallback((taskId: string) => {
-    setSelectedTaskId(taskId)
-    setDetailTaskId(taskId)
-  }, [])
+  const openTaskDetail = useCallback(
+    (taskId: string) => {
+      setSelectedTaskId(taskId)
+      setDetailTaskId(taskId)
+      updateRouteQuery({ board: selectedBoard?.slug ?? selectedBoardSlug, task: taskId })
+    },
+    [selectedBoard?.slug, selectedBoardSlug, updateRouteQuery]
+  )
 
   const openCreateTask = useCallback(() => {
     setForm(prev => ({
@@ -446,6 +528,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
       await refreshTasks(selectedBoard.slug)
       setSelectedTaskId(task.id)
       setDetailTaskId(task.id)
+      updateRouteQuery({ board: selectedBoard.slug, task: task.id })
       notify({ title: 'M.i.A Kanban', message: `Card criado: ${task.title}` })
     } catch (error) {
       notifyError(error, 'Failed to create Kanban task')
@@ -466,12 +549,24 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
         return
       }
 
+      if (!canUseRawKanbanStatusDrop(task, status)) {
+        notify({
+          title: 'WorkflowRoute',
+          message: 'Use Done para concluir etapa, Blocked para bloquear, ou ações da etapa no detalhe.'
+        })
+
+        return
+      }
+
       const previousTasks = tasks
-      setTasks(current => current.map(item => (item.id === taskId ? { ...item, status } : item)))
       setSelectedTaskId(taskId)
 
       try {
-        const updated = await updateKanbanTask(selectedBoard.slug, taskId, { status })
+        const semanticStatus = semanticStepStatusForKanbanDrop(status)
+        const currentStep = workflowCurrentStepForTask(task)
+        const updated = semanticStatus && currentStep
+          ? await updateKanbanWorkflowStep(selectedBoard.slug, taskId, currentStep.id, { status: semanticStatus })
+          : await updateKanbanTask(selectedBoard.slug, taskId, { status })
         setTasks(current => current.map(item => (item.id === updated.id ? updated : item)))
         setDetail(current => (current?.task.id === updated.id ? { ...current, task: updated } : current))
       } catch (error) {
@@ -495,7 +590,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Select onValueChange={setSelectedBoardSlug} value={selectedBoard?.slug ?? ''}>
+          <Select onValueChange={selectBoard} value={selectedBoard?.slug ?? ''}>
             <SelectTrigger className={cn(KANBAN_SELECT_TRIGGER_CLASS, 'w-52 rounded-lg bg-(--ui-bg-elevated) px-3')}>
               <SelectValue />
             </SelectTrigger>
@@ -515,7 +610,18 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
             <br />
             {tasks.some(task => task.status === 'running') ? '3s em execução' : '10s ocioso'}
           </div>
-          <Button onClick={() => void refresh()} type="button" variant="secondary">
+          <Button
+            onClick={() => {
+              void refresh()
+              if (selectedBoard?.slug) {
+                void Promise.all([refreshTasks(selectedBoard.slug), refreshDispatcherStatus(selectedBoard.slug)]).catch(error =>
+                  notifyError(error, 'Failed to refresh Kanban')
+                )
+              }
+            }}
+            type="button"
+            variant="secondary"
+          >
             Refresh
           </Button>
         </div>
@@ -531,7 +637,16 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
             Nenhum board Kanban encontrado ainda.
           </div>
         ) : (
-          <div className="grid min-w-[1180px] grid-cols-7 gap-3">
+          <div className="min-w-[1180px] space-y-3">
+            <DispatcherStatusPanel
+              onRefresh={() =>
+                selectedBoard?.slug
+                  ? void refreshDispatcherStatus(selectedBoard.slug).catch(error => notifyError(error, 'Failed to load dispatcher status'))
+                  : undefined
+              }
+              status={dispatcherStatus}
+            />
+            <div className="grid grid-cols-7 gap-3">
             {STATUSES.map(column => {
               const columnTasks = tasks.filter(task => task.status === column.value)
 
@@ -617,6 +732,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                 </section>
               )
             })}
+            </div>
           </div>
         )}
       </main>
@@ -639,6 +755,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
         onOpenChange={open => {
           if (!open) {
             setDetailTaskId(null)
+            updateRouteQuery({ task: null })
           }
         }}
         onRefreshDetail={loadTaskDetail}
@@ -647,6 +764,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
           setDetail(current => (current?.task.id === archivedTaskId ? null : current))
           setDetailTaskId(current => (current === archivedTaskId ? null : current))
           setSelectedTaskId(current => (current === archivedTaskId ? null : current))
+          updateRouteQuery({ task: null })
         }}
         onTaskUpdated={updated => {
           setTasks(current => current.map(item => (item.id === updated.id ? updated : item)))
@@ -655,6 +773,49 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
         open={!!detailTaskId}
         task={detailTask}
       />
+    </div>
+  )
+}
+
+function DispatcherStatusPanel({
+  onRefresh,
+  status
+}: {
+  onRefresh: () => void
+  status: KanbanDispatcherStatusResponse | null
+}) {
+  if (!status) {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 text-xs text-(--ui-text-tertiary)">
+        <span>Diagnóstico dispatcher: carregando…</span>
+        <Button onClick={onRefresh} size="sm" type="button" variant="secondary">
+          Diagnóstico
+        </Button>
+      </div>
+    )
+  }
+
+  const healthy = status.dispatch_in_gateway && status.gateway_pid
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2 text-(--ui-text-secondary)">
+        <span className={cn('rounded px-2 py-1', healthy ? 'bg-(--ui-bg-secondary) text-(--ui-green)' : 'bg-(--ui-bg-secondary) text-(--ui-red)')}>
+          dispatcher {healthy ? `ativo pid ${status.gateway_pid}` : 'sem gateway ativo'}
+        </span>
+        <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
+          dispatch_in_gateway={String(status.dispatch_in_gateway)}
+        </span>
+        <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
+          ready {status.ready_count} · running {status.running_count} · stale {status.stale_running_count}
+        </span>
+        <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
+          runs ativos {status.active_runs.length}
+        </span>
+      </div>
+      <Button onClick={onRefresh} size="sm" type="button" variant="secondary">
+        Diagnóstico
+      </Button>
     </div>
   )
 }
@@ -822,7 +983,10 @@ function TaskDetailDialog({
   const [savingTask, setSavingTask] = useState(false)
   const [archivingTask, setArchivingTask] = useState(false)
   const [workflowEvidenceBody, setWorkflowEvidenceBody] = useState('')
+  const [workflowStepForm, setWorkflowStepForm] = useState<WorkflowStepFormState>(EMPTY_WORKFLOW_STEP_FORM)
   const [savingWorkflowEvidence, setSavingWorkflowEvidence] = useState(false)
+  const [savingWorkflowStep, setSavingWorkflowStep] = useState(false)
+  const [updatingWorkflowStepId, setUpdatingWorkflowStepId] = useState<null | string>(null)
   const [applyingWorkflowPreset, setApplyingWorkflowPreset] = useState(false)
   const activeTaskId = activeTask?.id ?? null
   const timeline = useMemo(() => buildTimeline(detail), [detail])
@@ -849,6 +1013,7 @@ function TaskDetailDialog({
     setEditingCommentId(null)
     setExpandedCommentId(null)
     setWorkflowEvidenceBody('')
+    setWorkflowStepForm(EMPTY_WORKFLOW_STEP_FORM)
     setEditForm({
       assignee: activeTask.assignee ?? '',
       body: activeTask.body ?? '',
@@ -1031,6 +1196,63 @@ function TaskDetailDialog({
     }
   }
 
+  const addWorkflowStep = async () => {
+    if (!boardSlug || !activeTask) {
+      return
+    }
+
+    const stepId = workflowStepForm.id.trim()
+
+    if (!stepId) {
+      notify({ title: 'Kanban', message: 'ID da etapa é obrigatório' })
+
+      return
+    }
+
+    setSavingWorkflowStep(true)
+
+    try {
+      const maxRetries = workflowStepForm.max_retries.trim()
+      const updated = await createKanbanWorkflowStep(boardSlug, activeTask.id, {
+        assignee: workflowStepForm.assignee.trim() || null,
+        depends_on: splitWorkflowFormList(workflowStepForm.depends_on),
+        id: stepId,
+        max_retries: maxRetries ? Number.parseInt(maxRetries, 10) || 0 : null,
+        title: workflowStepForm.title.trim() || stepId,
+        type: workflowStepForm.type.trim() || 'custom',
+        validation_criteria: splitWorkflowFormList(workflowStepForm.validation_criteria)
+      })
+
+      setWorkflowStepForm(EMPTY_WORKFLOW_STEP_FORM)
+      onTaskUpdated(updated)
+      await onRefreshDetail(updated.id)
+      notify({ title: 'Kanban', message: `Etapa adicionada: ${stepId}` })
+    } catch (error) {
+      notifyError(error, 'Failed to add Kanban workflow step')
+    } finally {
+      setSavingWorkflowStep(false)
+    }
+  }
+
+  const updateWorkflowStep = async (stepId: string, payload: KanbanWorkflowStepUpdatePayload) => {
+    if (!boardSlug || !activeTask) {
+      return
+    }
+
+    setUpdatingWorkflowStepId(stepId)
+
+    try {
+      const updated = await updateKanbanWorkflowStep(boardSlug, activeTask.id, stepId, payload)
+      onTaskUpdated(updated)
+      await onRefreshDetail(updated.id)
+      notify({ title: 'Kanban', message: `Etapa atualizada: ${stepId}` })
+    } catch (error) {
+      notifyError(error, 'Failed to update Kanban workflow step')
+    } finally {
+      setUpdatingWorkflowStepId(null)
+    }
+  }
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="flex h-[min(92vh,58rem)] max-h-[92vh] max-w-6xl flex-col overflow-hidden border-(--ui-stroke-secondary) bg-(--ui-chat-bubble-background) p-0 text-(--ui-text-primary)">
@@ -1156,12 +1378,19 @@ function TaskDetailDialog({
 
               <WorkflowRoutePanel
                 applyingPreset={applyingWorkflowPreset}
+                assignees={assignees}
                 evidenceBody={workflowEvidenceBody}
+                onAddStep={() => void addWorkflowStep()}
                 onApplyPreset={() => void applyWorkflowPreset()}
                 onEvidenceBodyChange={setWorkflowEvidenceBody}
                 onRecordEvidence={() => void addWorkflowEvidence()}
+                onStepFormChange={setWorkflowStepForm}
+                onUpdateStep={(stepId, payload) => void updateWorkflowStep(stepId, payload)}
                 savingEvidence={savingWorkflowEvidence}
+                savingStep={savingWorkflowStep}
+                stepForm={workflowStepForm}
                 task={activeTask}
+                updatingStepId={updatingWorkflowStepId}
               />
 
               <AccordionBlock defaultOpen title={`Atividade recente (${timeline.length})`}>
@@ -1289,20 +1518,34 @@ function TaskDetailDialog({
 
 function WorkflowRoutePanel({
   applyingPreset,
+  assignees,
   evidenceBody,
+  onAddStep,
   onApplyPreset,
   onEvidenceBodyChange,
   onRecordEvidence,
+  onStepFormChange,
+  onUpdateStep,
   savingEvidence,
-  task
+  savingStep,
+  stepForm,
+  task,
+  updatingStepId
 }: {
   applyingPreset: boolean
+  assignees: string[]
   evidenceBody: string
+  onAddStep: () => void
   onApplyPreset: () => void
   onEvidenceBodyChange: (value: string) => void
   onRecordEvidence: () => void
+  onStepFormChange: React.Dispatch<React.SetStateAction<WorkflowStepFormState>>
+  onUpdateStep: (stepId: string, payload: KanbanWorkflowStepUpdatePayload) => void
   savingEvidence: boolean
+  savingStep: boolean
+  stepForm: WorkflowStepFormState
   task: KanbanTask
+  updatingStepId: null | string
 }) {
   const route = workflowRouteForTask(task)
   const currentStep = workflowCurrentStepForTask(task)
@@ -1361,6 +1604,61 @@ function WorkflowRoutePanel({
               <div className="mt-1 text-(--ui-text-tertiary)">
                 tipo {step.type || 'custom'} · retry {step.retry_count ?? 0}/{step.max_retries ?? '∞'}
               </div>
+              <div className="mt-3 grid gap-2 md:grid-cols-[10rem_1fr_auto_auto]">
+                <Select
+                  disabled={updatingStepId === step.id}
+                  onValueChange={value => onUpdateStep(step.id, { status: value as KanbanWorkflowStepStatus })}
+                  value={step.status}
+                >
+                  <SelectTrigger className={KANBAN_SELECT_TRIGGER_CLASS}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className={KANBAN_SELECT_CONTENT_CLASS}>
+                    {WORKFLOW_STEP_STATUSES.map(status => (
+                      <SelectItem className={KANBAN_SELECT_ITEM_CLASS} key={status} value={status}>
+                        {status}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  disabled={updatingStepId === step.id}
+                  onValueChange={value => onUpdateStep(step.id, { assignee: value === UNASSIGNED_SELECT_VALUE ? null : value })}
+                  value={step.assignee || UNASSIGNED_SELECT_VALUE}
+                >
+                  <SelectTrigger className={KANBAN_SELECT_TRIGGER_CLASS}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className={KANBAN_SELECT_CONTENT_CLASS}>
+                    <SelectItem className={KANBAN_SELECT_ITEM_CLASS} value={UNASSIGNED_SELECT_VALUE}>
+                      Sem perfil
+                    </SelectItem>
+                    {assignees.map(name => (
+                      <SelectItem className={KANBAN_SELECT_ITEM_CLASS} key={name} value={name}>
+                        {name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  disabled={updatingStepId === step.id}
+                  onClick={() => onUpdateStep(step.id, { status: 'passed' })}
+                  size="sm"
+                  type="button"
+                  variant="secondary"
+                >
+                  Passar
+                </Button>
+                <Button
+                  disabled={updatingStepId === step.id}
+                  onClick={() => onUpdateStep(step.id, { status: 'blocked' })}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Bloquear
+                </Button>
+              </div>
               {!!step.depends_on?.length && (
                 <div className="mt-1 text-(--ui-text-quaternary)">depende de: {step.depends_on.join(', ')}</div>
               )}
@@ -1386,6 +1684,71 @@ function WorkflowRoutePanel({
             </div>
           )
         })}
+      </div>
+
+      <div className="mt-3 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3">
+        <div className="mb-2 text-xs font-medium text-(--ui-text-secondary)">Adicionar etapa</div>
+        <div className="grid gap-2 md:grid-cols-[10rem_1fr_9rem_1fr]">
+          <Input
+            className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
+            onChange={event => onStepFormChange(prev => ({ ...prev, id: event.target.value }))}
+            placeholder="id-etapa"
+            value={stepForm.id}
+          />
+          <Input
+            className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
+            onChange={event => onStepFormChange(prev => ({ ...prev, title: event.target.value }))}
+            placeholder="Título"
+            value={stepForm.title}
+          />
+          <Input
+            className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
+            onChange={event => onStepFormChange(prev => ({ ...prev, type: event.target.value }))}
+            placeholder="tipo"
+            value={stepForm.type}
+          />
+          <Select
+            onValueChange={value => onStepFormChange(prev => ({ ...prev, assignee: value === UNASSIGNED_SELECT_VALUE ? '' : value }))}
+            value={stepForm.assignee || UNASSIGNED_SELECT_VALUE}
+          >
+            <SelectTrigger className={KANBAN_SELECT_TRIGGER_CLASS}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className={KANBAN_SELECT_CONTENT_CLASS}>
+              <SelectItem className={KANBAN_SELECT_ITEM_CLASS} value={UNASSIGNED_SELECT_VALUE}>
+                Sem perfil
+              </SelectItem>
+              {assignees.map(name => (
+                <SelectItem className={KANBAN_SELECT_ITEM_CLASS} key={name} value={name}>
+                  {name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="mt-2 grid gap-2 md:grid-cols-[1fr_1fr_7rem_auto]">
+          <Input
+            className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
+            onChange={event => onStepFormChange(prev => ({ ...prev, depends_on: event.target.value }))}
+            placeholder="depends_on: plan,review"
+            value={stepForm.depends_on}
+          />
+          <Input
+            className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
+            onChange={event => onStepFormChange(prev => ({ ...prev, validation_criteria: event.target.value }))}
+            placeholder="critério 1, critério 2"
+            value={stepForm.validation_criteria}
+          />
+          <Input
+            className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
+            onChange={event => onStepFormChange(prev => ({ ...prev, max_retries: event.target.value }))}
+            type="number"
+            value={stepForm.max_retries}
+          />
+          <Button disabled={savingStep} onClick={onAddStep} size="sm" type="button">
+            {savingStep ? 'Adicionando…' : 'Adicionar'}
+          </Button>
+        </div>
       </div>
 
       <div className="mt-3 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3">

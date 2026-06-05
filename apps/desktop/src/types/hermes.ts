@@ -86,6 +86,8 @@ export interface KanbanWorkflowEvidence {
   timestamp?: null | number
 }
 
+export type KanbanWorkflowStepStatus = 'pending' | 'ready' | 'running' | 'passed' | 'blocked' | 'failed'
+
 export interface KanbanWorkflowStep {
   assignee?: null | string
   depends_on?: string[]
@@ -93,10 +95,26 @@ export interface KanbanWorkflowStep {
   id: string
   max_retries?: null | number
   retry_count?: number
-  status: string
+  status: KanbanWorkflowStepStatus
   title?: null | string
   type?: null | string
   validation_criteria?: string[]
+}
+
+export interface KanbanWorkflowStepPayload {
+  assignee?: null | string
+  depends_on?: string[]
+  id: string
+  max_retries?: null | number
+  title?: null | string
+  type?: null | string
+  validation_criteria?: string[]
+}
+
+export interface KanbanWorkflowStepUpdatePayload {
+  assignee?: null | string
+  evidence?: null | string
+  status?: KanbanWorkflowStepStatus
 }
 
 export interface KanbanWorkflowRoute {
@@ -229,6 +247,32 @@ export interface KanbanTaskDetailResponse {
 export interface KanbanAssigneesResponse {
   assignees: string[]
   object: 'list'
+}
+
+export interface KanbanDispatcherRun {
+  claim_expires?: null | number
+  id: number
+  last_heartbeat_at?: null | number
+  profile?: null | string
+  started_at: number
+  status: string
+  step_key?: null | string
+  task_id: string
+  task_status: KanbanStatus
+  title: string
+  worker_pid?: null | number
+}
+
+export interface KanbanDispatcherStatusResponse {
+  active_runs: KanbanDispatcherRun[]
+  board: KanbanBoard | null
+  dispatch_in_gateway: boolean
+  gateway_pid?: null | number
+  last_event_at?: null | number
+  object: 'hermes.kanban.dispatcher_status'
+  ready_count: number
+  running_count: number
+  stale_running_count: number
 }
 
 export interface ConfigFieldSchema {

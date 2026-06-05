@@ -2016,6 +2016,35 @@ def _parse_workflow_route_payload(body: Dict[str, Any]) -> tuple[bool, Any]:
     return False, None
 
 
+def _kanban_payload_string_list(value: Any, *, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    if isinstance(value, (list, tuple)):
+        items: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                items.append(text)
+        return tuple(items)
+    raise HTTPException(status_code=400, detail=f"{field} must be a list or comma-separated string")
+
+
+def _kanban_dispatch_in_gateway_enabled() -> bool:
+    override = os.environ.get("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
+    if override in {"0", "false", "no", "off"}:
+        return False
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        cfg = load_config()
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        if isinstance(kanban_cfg, dict):
+            return bool(kanban_cfg.get("dispatch_in_gateway", True))
+    except Exception:
+        _log.exception("Failed to read kanban.dispatch_in_gateway")
+    return True
 def _task_response(row: sqlite3.Row) -> Dict[str, Any]:
     workflow_route = _row_value(row, "workflow_route")
     if isinstance(workflow_route, str) and workflow_route.strip():
@@ -2127,6 +2156,8 @@ async def create_kanban_task(slug: str, request: Request):
         body = await request.json()
     except Exception:
         body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid task payload")
     title = str(body.get("title") or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="Task title is required")
@@ -2144,37 +2175,60 @@ async def create_kanban_task(slug: str, request: Request):
     workspace_kind = _normalize_kanban_workspace_kind(body.get("workspace_kind"))
     has_workflow_route, workflow_route_raw = _parse_workflow_route_payload(body)
     workflow_route = None
-    if has_workflow_route:
-        from hermes_cli import kanban_db
+    from hermes_cli import kanban_db
 
+    if has_workflow_route:
         try:
             workflow_route = kanban_db.normalize_workflow_route(workflow_route_raw)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid workflowRoute: {exc}") from None
         if not workflow_route:
             raise HTTPException(status_code=400, detail="workflowRoute must contain at least one step")
-    task_id = f"t_{uuid.uuid4().hex[:12]}"
-    now = int(time.time())
+
     conn = _connect_kanban_board(slug)
     try:
-        conn.execute(
-            """
-            INSERT INTO tasks (id, title, body, assignee, status, priority, created_by, created_at,
-                               workspace_kind, workspace_path, tenant)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (task_id, title, task_body, assignee, status, priority, "desktop", now, workspace_kind, workspace_path, tenant),
-        )
-        conn.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
-            (task_id, "task.created", json.dumps({"source": "desktop", "status": status}, ensure_ascii=False), now),
-        )
-        conn.commit()
-        if workflow_route is not None:
-            from hermes_cli import kanban_db
+        try:
+            task_id = kanban_db.create_task(
+                conn,
+                title=title,
+                body=task_body,
+                assignee=assignee,
+                created_by="desktop",
+                workspace_kind=workspace_kind,
+                workspace_path=workspace_path,
+                tenant=tenant,
+                priority=priority,
+                initial_status="blocked" if status == "blocked" else "running",
+                triage=status == "triage",
+                board=slug,
+                workflow_route=workflow_route,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
-            kanban_db.set_workflow_route(conn, task_id, workflow_route, actor="desktop")
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=500, detail="Kanban task was not created")
+        if status != row["status"]:
+            updates: Dict[str, Any] = {"status": status}
+            now = int(time.time())
+            if status == "running" and not row["started_at"]:
+                updates["started_at"] = now
+            if status == "done":
+                updates["completed_at"] = now
+            assignments = ", ".join(f"{key} = ?" for key in updates)
+            conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", (*updates.values(), task_id))
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    task_id,
+                    "task.updated",
+                    json.dumps({"source": "desktop", "changes": {"status": {"from": row["status"], "to": status}}}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return JSONResponse(status_code=201, content={"object": "hermes.kanban.task", "task": _task_response(row)})
     finally:
         conn.close()
@@ -2504,6 +2558,149 @@ async def create_kanban_task_workflow_evidence(slug: str, task_id: str, request:
         return {"object": "hermes.kanban.task", "task": _task_response(row)}
     finally:
         conn.close()
+
+
+@app.post("/api/kanban/boards/{slug}/tasks/{task_id}/workflow/steps")
+async def create_kanban_task_workflow_step(slug: str, task_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid workflow step payload")
+    step_id = str(body.get("id") or body.get("step_id") or "").strip()
+    if not step_id:
+        raise HTTPException(status_code=400, detail="Workflow step id is required")
+    title = str(body.get("title") or "").strip() or None
+    step_type = str(body.get("type") or body.get("step_type") or "custom").strip() or "custom"
+    assignee = str(body.get("assignee") or "").strip() or None
+    depends_on = _kanban_payload_string_list(body.get("depends_on"), field="depends_on")
+    criteria_value = body.get("validation_criteria", body.get("criteria"))
+    validation_criteria = _kanban_payload_string_list(criteria_value, field="validation_criteria")
+    max_retries = None
+    if "max_retries" in body and body.get("max_retries") not in (None, ""):
+        try:
+            max_retries = int(body.get("max_retries"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="max_retries must be an integer") from None
+        if max_retries < 0:
+            raise HTTPException(status_code=400, detail="max_retries must be >= 0")
+
+    conn = _connect_kanban_board(slug)
+    try:
+        if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        from hermes_cli import kanban_db
+
+        try:
+            kanban_db.add_workflow_step(
+                conn,
+                task_id,
+                step_id=step_id,
+                title=title,
+                step_type=step_type,
+                assignee=assignee,
+                depends_on=depends_on,
+                validation_criteria=validation_criteria,
+                max_retries=max_retries,
+                actor="desktop",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return {"object": "hermes.kanban.task", "task": _task_response(row)}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/kanban/boards/{slug}/tasks/{task_id}/workflow/steps/{step_id}")
+async def update_kanban_task_workflow_step(slug: str, task_id: str, step_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid workflow step payload")
+    if not any(key in body for key in ("status", "assignee", "evidence")):
+        raise HTTPException(status_code=400, detail="Pass status, assignee, or evidence")
+    status = str(body.get("status") or "").strip().lower() or None if "status" in body else None
+    assignee = str(body.get("assignee") or "").strip() if "assignee" in body else None
+    evidence = str(body.get("evidence") or "").strip() or None if "evidence" in body else None
+
+    conn = _connect_kanban_board(slug)
+    try:
+        if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        from hermes_cli import kanban_db
+
+        try:
+            kanban_db.update_workflow_step(
+                conn,
+                task_id,
+                step_id,
+                status=status,
+                evidence=evidence,
+                assignee=assignee,
+                actor="desktop",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return {"object": "hermes.kanban.task", "task": _task_response(row)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/kanban/boards/{slug}/dispatcher/status")
+def get_kanban_dispatcher_status(slug: str):
+    conn = _connect_kanban_board(slug)
+    try:
+        from hermes_cli import kanban_db
+
+        now = int(time.time())
+        heartbeat_cutoff = now - kanban_db.DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+        ready_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'ready'").fetchone()[0]
+        running_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'").fetchone()[0]
+        stale_running_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM tasks
+            WHERE status = 'running'
+              AND (
+                (claim_expires IS NOT NULL AND claim_expires < ?)
+                OR (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?)
+              )
+            """,
+            (now, heartbeat_cutoff),
+        ).fetchone()[0]
+        last_event_at = conn.execute("SELECT MAX(created_at) FROM task_events").fetchone()[0]
+        rows = conn.execute(
+            """
+            SELECT r.id, r.task_id, r.profile, r.step_key, r.status,
+                   r.claim_expires, r.worker_pid, r.last_heartbeat_at, r.started_at,
+                   t.title, t.status AS task_status
+            FROM task_runs r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE r.ended_at IS NULL
+            ORDER BY r.started_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+        active_runs = [dict(row) for row in rows]
+        gateway_pid = get_running_pid()
+        return {
+            "object": "hermes.kanban.dispatcher_status",
+            "board": _read_board_meta(slug),
+            "dispatch_in_gateway": _kanban_dispatch_in_gateway_enabled(),
+            "gateway_pid": gateway_pid,
+            "ready_count": ready_count,
+            "running_count": running_count,
+            "stale_running_count": stale_running_count,
+            "last_event_at": last_event_at,
+            "active_runs": active_runs,
+        }
+    finally:
+        conn.close()
+
 
 
 @app.get("/api/kanban/assignees")

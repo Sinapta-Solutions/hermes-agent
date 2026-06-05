@@ -21,6 +21,7 @@ import type {
   KanbanComment,
   KanbanCommentMutationResponse,
   KanbanCommentPayload,
+  KanbanDispatcherStatusResponse,
   KanbanTask,
   KanbanTaskDetailResponse,
   KanbanTaskMutationResponse,
@@ -28,6 +29,8 @@ import type {
   KanbanTaskPayload,
   KanbanTasksResponse,
   KanbanTaskUpdatePayload,
+  KanbanWorkflowStepPayload,
+  KanbanWorkflowStepUpdatePayload,
   LogsResponse,
   MessagingPlatformsResponse,
   MessagingPlatformTestResponse,
@@ -90,6 +93,8 @@ export type {
   KanbanComment,
   KanbanCommentMutationResponse,
   KanbanCommentPayload,
+  KanbanDispatcherRun,
+  KanbanDispatcherStatusResponse,
   KanbanEvent,
   KanbanFailure,
   KanbanStatus,
@@ -99,6 +104,12 @@ export type {
   KanbanTaskPayload,
   KanbanTasksResponse,
   KanbanTaskUpdatePayload,
+  KanbanWorkflowEvidence,
+  KanbanWorkflowRoute,
+  KanbanWorkflowStep,
+  KanbanWorkflowStepPayload,
+  KanbanWorkflowStepStatus,
+  KanbanWorkflowStepUpdatePayload,
   LogsResponse,
   MessagingEnvVarInfo,
   MessagingHomeChannel,
@@ -226,6 +237,41 @@ export function createKanbanWorkflowEvidence(
       body
     })
     .then(result => result.task)
+}
+
+export function createKanbanWorkflowStep(
+  boardSlug: string,
+  taskId: string,
+  body: KanbanWorkflowStepPayload
+): Promise<KanbanTask> {
+  return window.hermesDesktop
+    .api<KanbanTaskMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/workflow/steps`,
+      method: 'POST',
+      body
+    })
+    .then(result => result.task)
+}
+
+export function updateKanbanWorkflowStep(
+  boardSlug: string,
+  taskId: string,
+  stepId: string,
+  body: KanbanWorkflowStepUpdatePayload
+): Promise<KanbanTask> {
+  return window.hermesDesktop
+    .api<KanbanTaskMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/workflow/steps/${encodeURIComponent(stepId)}`,
+      method: 'PATCH',
+      body
+    })
+    .then(result => result.task)
+}
+
+export function getKanbanDispatcherStatus(boardSlug: string): Promise<KanbanDispatcherStatusResponse> {
+  return window.hermesDesktop.api<KanbanDispatcherStatusResponse>({
+    path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/dispatcher/status`
+  })
 }
 
 export function createKanbanTaskComment(

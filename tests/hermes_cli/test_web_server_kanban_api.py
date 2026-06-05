@@ -116,3 +116,95 @@ def test_desktop_kanban_workflow_route_create_apply_preset_and_evidence(tmp_path
     step = detail.json()["task"]["workflowRoute"]["steps"][0]
     assert step["id"] == "planning"
     assert step["evidence"][-1]["text"] == "desktop evidence"
+
+
+
+def test_desktop_kanban_workflow_step_endpoints_add_and_update_step(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="steps")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    route = {
+        "version": kanban_db.WORKFLOW_ROUTE_VERSION,
+        "template_id": "desktop-custom",
+        "steps": [
+            {"id": "plan", "title": "Plan", "type": "planning", "assignee": "planner"},
+        ],
+    }
+
+    created = client.post(
+        "/api/kanban/boards/steps/tasks",
+        headers=headers,
+        json={"title": "workflow steps", "workflowRoute": route},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+
+    added = client.post(
+        f"/api/kanban/boards/steps/tasks/{task_id}/workflow/steps",
+        headers=headers,
+        json={
+            "id": "review",
+            "title": "Review",
+            "type": "review",
+            "assignee": "reviewer",
+            "depends_on": ["plan"],
+            "validation_criteria": ["Review notes recorded"],
+            "max_retries": 2,
+        },
+    )
+    assert added.status_code == 200
+    task = added.json()["task"]
+    review = next(step for step in task["workflowRoute"]["steps"] if step["id"] == "review")
+    assert review["assignee"] == "reviewer"
+    assert review["depends_on"] == ["plan"]
+    assert review["validation_criteria"] == ["Review notes recorded"]
+    assert review["max_retries"] == 2
+
+    updated = client.patch(
+        f"/api/kanban/boards/steps/tasks/{task_id}/workflow/steps/review",
+        headers=headers,
+        json={"status": "blocked", "assignee": "auditor", "evidence": "needs rework"},
+    )
+    assert updated.status_code == 200
+    review = next(step for step in updated.json()["task"]["workflowRoute"]["steps"] if step["id"] == "review")
+    assert review["status"] == "blocked"
+    assert review["assignee"] == "auditor"
+    assert review["evidence"][-1]["text"] == "needs rework"
+
+
+
+def test_desktop_kanban_dispatcher_status_endpoint_reports_counts(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="disp")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+
+    ready = client.post(
+        "/api/kanban/boards/disp/tasks",
+        headers=headers,
+        json={"title": "ready task", "status": "ready", "assignee": "worker"},
+    )
+    assert ready.status_code == 201
+    running = client.post(
+        "/api/kanban/boards/disp/tasks",
+        headers=headers,
+        json={"title": "running task", "status": "running", "assignee": "worker"},
+    )
+    assert running.status_code == 201
+
+    status = client.get("/api/kanban/boards/disp/dispatcher/status", headers=headers)
+    assert status.status_code == 200
+    body = status.json()
+    assert body["object"] == "hermes.kanban.dispatcher_status"
+    assert isinstance(body["dispatch_in_gateway"], bool)
+    assert body["ready_count"] >= 1
+    assert body["running_count"] >= 1
+    assert body["stale_running_count"] == 0
+    assert isinstance(body["active_runs"], list)
