@@ -17,7 +17,7 @@ import { cn } from '@/lib/utils'
 import { $hapticsMuted, toggleHapticsMuted } from '@/store/haptics'
 import { $fileBrowserOpen, $sidebarOpen, toggleFileBrowserOpen, toggleSidebarOpen } from '@/store/layout'
 
-import { AGENTS_ROUTE, PROFILES_ROUTE } from '../routes'
+import { PROFILES_ROUTE } from '../routes'
 
 import { titlebarButtonClass } from './titlebar'
 
@@ -199,15 +199,6 @@ function ProfilesMenuButton({ navigate }: { navigate: ReturnType<typeof useNavig
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={() => {
-            triggerHaptic('open')
-            navigate(AGENTS_ROUTE)
-          }}
-        >
-          <Codicon name="account" size="1rem" />
-          <span>Manage agents</span>
-        </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => {
             triggerHaptic('open')

@@ -62,7 +62,15 @@ import {
   sessionSidebarTotals
 } from '@/store/session'
 
-import { AGENTS_ROUTE, type AppView, ARTIFACTS_ROUTE, KANBAN_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE, WORKSPACES_ROUTE } from '../../routes'
+import {
+  AGENT_PROFILES_ROUTE,
+  type AppView,
+  ARTIFACTS_ROUTE,
+  KANBAN_ROUTE,
+  MESSAGING_ROUTE,
+  SKILLS_ROUTE,
+  WORKSPACES_ROUTE
+} from '../../routes'
 import { SidebarPanelLabel } from '../../shell/sidebar-label'
 import type { SidebarNavItem } from '../../types'
 
@@ -90,7 +98,7 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     icon: props => <Codicon name="symbol-misc" {...props} />,
     route: SKILLS_ROUTE
   },
-  { id: 'agents', label: 'Agents', icon: props => <Codicon name="account" {...props} />, route: AGENTS_ROUTE },
+  { id: 'agent-profiles', label: 'Agents', icon: props => <Codicon name="account" {...props} />, route: AGENT_PROFILES_ROUTE },
   { id: 'workspaces', label: 'Workspaces', icon: props => <Codicon name="root-folder" {...props} />, route: WORKSPACES_ROUTE },
   { id: 'kanban', label: 'Kanban', icon: props => <Codicon name="project" {...props} />, route: KANBAN_ROUTE },
   { id: 'messaging', label: 'Messaging', icon: props => <Codicon name="comment" {...props} />, route: MESSAGING_ROUTE },
@@ -372,12 +380,15 @@ export function ChatSidebar({
 
   const showSessionSkeletons = sessionsLoading && sortedSessions.length === 0
   const showSessionSections = showSessionSkeletons || sortedSessions.length > 0
+
   const sessionTotals = sessionSidebarTotals({
     loadedCount: sortedSessions.length,
     pinnedCount: pinnedSessions.length,
     serverTotal: sessionsTotal
   })
+
   const hasMoreSessions = sessionTotals.hasMore
+
   const remainingSessionCount = sessionTotals.remaining
 
   const handlePinnedDragEnd = ({ active, over }: DragEndEvent) => {
@@ -454,7 +465,7 @@ export function ChatSidebar({
 
                 const active =
                   (item.id === 'skills' && currentView === 'skills') ||
-                  (item.id === 'agents' && currentView === 'agents') ||
+                  (item.id === 'agent-profiles' && currentView === 'agent-profiles') ||
                   (item.id === 'workspaces' && currentView === 'workspaces') ||
                   (item.id === 'messaging' && currentView === 'messaging') ||
                   (item.id === 'artifacts' && currentView === 'artifacts')
