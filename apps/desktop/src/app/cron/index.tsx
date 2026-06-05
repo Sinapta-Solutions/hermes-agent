@@ -36,13 +36,38 @@ import { CronJobActionsMenu, CronJobActionsTrigger } from './cron-job-actions-me
 
 const DEFAULT_DELIVER = 'local'
 
-const DELIVERY_OPTIONS: ReadonlyArray<{ label: string; value: string }> = [
+type DeliveryOption = { label: string; value: string }
+
+const DELIVERY_OPTIONS: ReadonlyArray<DeliveryOption> = [
   { label: 'This desktop', value: 'local' },
+  { label: 'Origin chat', value: 'origin' },
   { label: 'Telegram', value: 'telegram' },
   { label: 'Discord', value: 'discord' },
   { label: 'Slack', value: 'slack' },
-  { label: 'Email', value: 'email' }
+  { label: 'Email', value: 'email' },
+  { label: 'All connected platforms', value: 'all' }
 ]
+
+export function deliveryDisplayLabel(value: string): string {
+  const trimmed = value.trim()
+  const known = DELIVERY_OPTIONS.find(option => option.value === trimmed)
+
+  if (known) {
+    return known.label
+  }
+
+  return trimmed ? `Custom: ${trimmed}` : 'This desktop'
+}
+
+export function deliveryOptionsForValue(value: string): ReadonlyArray<DeliveryOption> {
+  const trimmed = value.trim()
+
+  if (!trimmed || DELIVERY_OPTIONS.some(option => option.value === trimmed)) {
+    return DELIVERY_OPTIONS
+  }
+
+  return [...DELIVERY_OPTIONS, { label: deliveryDisplayLabel(trimmed), value: trimmed }]
+}
 
 const SCHEDULE_OPTIONS: ReadonlyArray<ScheduleOption> = [
   {
@@ -528,6 +553,7 @@ function CronJobRow({
   const hasName = Boolean(jobName(job))
   const prompt = jobPrompt(job)
   const deliver = jobDeliver(job)
+  const deliverLabel = deliveryDisplayLabel(deliver)
 
   return (
     <div className="grid gap-3 px-3 py-2.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
@@ -542,8 +568,8 @@ function CronJobRow({
             {state}
           </Badge>
           {deliver && deliver !== DEFAULT_DELIVER && (
-            <Badge className="capitalize" variant="muted">
-              {deliver}
+            <Badge variant="muted">
+              {deliverLabel}
             </Badge>
           )}
         </div>
@@ -664,6 +690,7 @@ function CronEditorDialog({
   }
 
   const scheduleHint = scheduleSummary(selectedScheduleOption, schedule)
+  const deliveryOptions = useMemo(() => deliveryOptionsForValue(deliver), [deliver])
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
@@ -748,7 +775,7 @@ function CronEditorDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {DELIVERY_OPTIONS.map(option => (
+                  {deliveryOptions.map(option => (
                     <SelectItem key={option.value} value={option.value}>
                       {option.label}
                     </SelectItem>
