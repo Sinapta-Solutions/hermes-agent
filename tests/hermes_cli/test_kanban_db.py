@@ -360,6 +360,46 @@ def test_claim_once_wins_second_loses(kanban_home):
         assert second is None
 
 
+
+
+def test_release_task_requires_matching_claimer_and_keeps_run_history(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="release me", assignee="worker")
+        claimed = kb.claim_task(conn, task_id, claimer="host:worker")
+        assert claimed is not None
+        run_id = kb.get_task(conn, task_id).current_run_id
+
+        assert kb.release_task(conn, task_id, claimer="host:other", reason="wrong worker") is False
+        assert kb.get_task(conn, task_id).claim_lock == "host:worker"
+
+        assert kb.release_task(conn, task_id, claimer="host:worker", reason="handoff") is True
+        task = kb.get_task(conn, task_id)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+        assert task.claim_expires is None
+        assert task.current_run_id is None
+
+        run = conn.execute("SELECT status, outcome, summary FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        assert dict(run) == {"status": "released", "outcome": "released", "summary": "handoff"}
+        events = kb.list_events(conn, task_id)
+        assert any(event.kind == "released" and event.payload["claimer"] == "host:worker" for event in events)
+
+
+def test_force_release_task_requires_reason_and_audits(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="force release me", assignee="worker")
+        assert kb.claim_task(conn, task_id, claimer="host:worker") is not None
+
+        assert kb.force_release_task(conn, task_id, reason="") is False
+        assert kb.get_task(conn, task_id).claim_lock == "host:worker"
+
+        assert kb.force_release_task(conn, task_id, reason="operator override") is True
+        task = kb.get_task(conn, task_id)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+        events = kb.list_events(conn, task_id)
+        assert any(event.kind == "force_released" and event.payload["reason"] == "operator override" for event in events)
+
 def test_claim_uses_env_default_ttl(kanban_home, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_CLAIM_TTL_SECONDS", "3600")
     with kb.connect() as conn:
@@ -1161,9 +1201,82 @@ def test_recompute_ready_per_task_max_retries_overrides_dispatcher(kanban_home):
         assert task.consecutive_failures == 2
 
 
+
+
+def test_comment_resume_intent_unblocks_blocked_task(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="needs human", assignee="a", initial_status="blocked")
+
+        comment_id = kb.add_comment(conn, task_id, author="operator", body="retomar", intent="resume")
+
+        assert comment_id
+        assert kb.get_task(conn, task_id).status == "ready"
+        events = kb.list_events(conn, task_id)
+        intent_event = next(event for event in events if event.kind == "comment_intent")
+        assert intent_event.payload["intent"] == "resume"
+        assert intent_event.payload["applied"] is True
+        assert any(event.kind == "unblocked" for event in events)
+
+
+def test_comment_interrupt_intent_marks_active_run_without_releasing(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="active", assignee="a")
+        claimed = kb.claim_task(conn, task_id, claimer="host:worker")
+        assert claimed is not None
+        run_id = kb.latest_run(conn, task_id).id
+
+        comment_id = kb.add_comment(conn, task_id, author="operator", body="interromper", intent="interrupt")
+
+        task = kb.get_task(conn, task_id)
+        assert task.status == "running"
+        assert task.current_run_id == run_id
+        events = kb.list_events(conn, task_id)
+        interrupt = next(event for event in events if event.kind == "interrupt_requested")
+        assert interrupt.run_id == run_id
+        assert interrupt.payload["comment_id"] == comment_id
+        assert interrupt.payload["author"] == "operator"
+
+
 # ---------------------------------------------------------------------------
 # Parent-completion invariant at the claim gate (RCA t_a6acd07d)
 # ---------------------------------------------------------------------------
+
+
+
+def test_unresolved_blockers_for_task_returns_open_parent_metadata(kanban_home):
+    with kb.connect() as conn:
+        blocker = kb.create_task(conn, title="blocking work", assignee="a")
+        child = kb.create_task(conn, title="blocked work", assignee="a", parents=[blocker])
+
+        blockers = kb.unresolved_blockers_for_task(conn, child)
+
+        assert blockers == [
+            {
+                "id": blocker,
+                "title": "blocking work",
+                "status": "ready",
+                "assignee": "a",
+            }
+        ]
+        kb.claim_task(conn, blocker)
+        kb.complete_task(conn, blocker, result="ok")
+        assert kb.unresolved_blockers_for_task(conn, child) == []
+
+
+def test_claim_rejected_by_unresolved_blockers_records_blocker_ids(kanban_home):
+    with kb.connect() as conn:
+        blocker = kb.create_task(conn, title="blocking work", assignee="a")
+        child = kb.create_task(conn, title="blocked work", assignee="a", parents=[blocker])
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (child,))
+        conn.commit()
+
+        assert kb.claim_task(conn, child, claimer="host:blocker-test") is None
+        events = kb.list_events(conn, child)
+
+        rejection = next(event for event in events if event.kind == "claim_rejected")
+        assert rejection.payload["reason"] == "unresolved_blockers"
+        assert rejection.payload["blockers"] == [blocker]
+
 
 def test_claim_rejects_when_parents_not_done(kanban_home):
     """claim_task must refuse ready->running if any parent isn't 'done'.
@@ -1546,6 +1659,29 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
     # c is now running
     with kb.connect() as conn:
         assert kb.get_task(conn, c).status == "running"
+
+
+def test_dispatch_claims_task_before_spawn_fn(kanban_home, all_assignees_spawnable):
+    observations = []
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="claim-first", assignee="alice")
+
+        def fake_spawn(task, workspace):
+            persisted = kb.get_task(conn, task.id)
+            observations.append(
+                (
+                    task.status,
+                    persisted.status,
+                    bool(persisted.claim_lock),
+                    persisted.current_run_id is not None,
+                )
+            )
+
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        assert res.spawned[0][0] == task_id
+        assert observations == [("running", "running", True, True)]
 
 
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
@@ -4500,6 +4636,46 @@ def test_workflow_claim_and_complete_advances_steps_then_finishes_card(kanban_ho
         assert kb.workflow_is_complete(task.workflow_route)
 
 
+def test_workflow_approval_pending_blocks_step_completion_until_approved(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="approval flow", assignee="fallback", workflow_route=_workflow_route())
+        assert kb.claim_task(conn, tid, claimer="approval-worker") is not None
+
+        approval = kb.request_workflow_approval(
+            conn,
+            tid,
+            "planning",
+            reason="human must approve plan",
+            actor="worker",
+            run_id=123,
+        )
+        assert approval["status"] == "pending"
+
+        with pytest.raises(ValueError, match="approval pending"):
+            kb.update_workflow_step(conn, tid, "planning", status="passed", actor="desktop")
+        assert kb.complete_task(conn, tid, summary="done") is False
+
+        decided = kb.resolve_workflow_approval(
+            conn,
+            tid,
+            "planning",
+            decision="approved",
+            actor="desktop",
+            reason="looks good",
+        )
+        assert decided["status"] == "approved"
+
+        kb.update_workflow_step(conn, tid, "planning", status="passed", actor="desktop")
+        task = kb.get_task(conn, tid)
+        step = task.workflow_route["steps"][0]
+        assert step["approval"]["status"] == "approved"
+        assert task.current_step_key == "implementation"
+        events = kb.list_events(conn, tid)
+
+    assert any(event.kind == "workflow.approval.requested" for event in events)
+    assert any(event.kind == "workflow.approval.approved" for event in events)
+
+
 def test_jurishub_workflow_preset_sets_expected_steps(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="jurishub flow", assignee="juris-agent")
@@ -4518,6 +4694,7 @@ def test_jurishub_workflow_preset_sets_expected_steps(kanban_home):
     ]
     assert task.current_step_key == "planning"
     assert task.assignee == "juris-agent"
+
 
 
 def test_workflow_spawn_failure_retries_then_blocks_current_step(kanban_home):

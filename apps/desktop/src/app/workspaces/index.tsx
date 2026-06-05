@@ -83,10 +83,12 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
 
   const refresh = useCallback(async () => {
     setLoading(true)
+
     try {
       const next = await getWorkspaces()
       setWorkspaces(next)
       setSelectedId(current => current ?? next[0]?.id ?? null)
+
       const statusEntries = await Promise.all(
         next.map(async workspace => {
           try {
@@ -96,6 +98,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
           }
         })
       )
+
       setStatuses(Object.fromEntries(statusEntries.filter(Boolean) as Array<readonly [string, WorkspaceStatus]>))
     } catch (error) {
       notifyError(error, 'Failed to load workspaces')
@@ -111,8 +114,10 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
   useEffect(() => {
     if (!selected) {
       setEvents([])
+
       return
     }
+
     void getWorkspaceEvents(selected.id, 20)
       .then(result => setEvents(result.events))
       .catch(() => setEvents([]))
@@ -122,6 +127,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
     setStatusbarItemGroup?.('workspaces', [
       { id: 'workspaces-count', label: `${workspaces.length} workspace${workspaces.length === 1 ? '' : 's'}` }
     ])
+
     return () => setStatusbarItemGroup?.('workspaces', [])
   }, [setStatusbarItemGroup, workspaces.length])
 
@@ -129,6 +135,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
     if (!selected || isCreating || editingId === selected.id) {
       return
     }
+
     setEditingId(selected.id)
     setForm(hydrateForm(selected))
   }, [editingId, isCreating, selected])
@@ -148,11 +155,15 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
 
   const save = async () => {
     const payload = compactPayload(form)
+
     if (!payload.name) {
       notify({ message: 'Workspace name is required', title: 'Workspaces' })
+
       return
     }
+
     setSaving(true)
+
     try {
       const workspace = editingId && !isCreating ? await updateWorkspace(editingId, payload) : await createWorkspace(payload)
       await refresh()
@@ -205,6 +216,7 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
             {workspaces.map(workspace => {
               const status = statuses[workspace.id]
               const active = selected?.id === workspace.id
+
               return (
                 <button
                   className={cn(
@@ -283,6 +295,18 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
                   <StatusLine label="Repo" ok={activeStatus?.repo_exists} value={selected.repo_path || 'not configured'} />
                   <StatusLine label="Vault" ok={activeStatus?.vault_exists} value={selected.vault_path || 'not configured'} />
                   <StatusLine label="Description" value={selected.description || 'not configured'} />
+                  {activeStatus?.close_readiness && (
+                    <div className="rounded-lg border border-(--ui-stroke-secondary) p-3 text-sm">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium uppercase tracking-wide text-(--ui-text-tertiary)">Close readiness</span>
+                        <span className={cn('text-xs', activeStatus.close_readiness.ready ? 'text-primary' : 'text-(--ui-red)')}>
+                          {activeStatus.close_readiness.ready ? 'ready' : 'blocked'}
+                        </span>
+                      </div>
+                      <ReadinessList items={activeStatus.close_readiness.blockers} title="Blockers" />
+                      <ReadinessList items={activeStatus.close_readiness.warnings} title="Warnings" />
+                    </div>
+                  )}
                   <div className="grid grid-cols-3 gap-2">
                     <Metric label="Profiles" value={activeStatus?.profile_count ?? 0} />
                     <Metric label="Tasks" value={taskTotal} />
@@ -347,6 +371,24 @@ function StatusLine({ label, ok, value }: { label: string; ok?: boolean; value: 
     </div>
   )
 }
+
+function ReadinessList({ items, title }: { items: NonNullable<WorkspaceStatus['close_readiness']>['blockers']; title: string }) {
+  if (!items.length) {
+    return <div className="mt-2 text-xs text-(--ui-text-quaternary)">{title}: none</div>
+  }
+
+  return (
+    <div className="mt-2 text-xs text-(--ui-text-tertiary)">
+      <div className="font-medium text-(--ui-text-secondary)">{title}</div>
+      <ul className="mt-1 list-disc space-y-1 pl-4">
+        {items.map(item => (
+          <li key={`${item.code}-${item.path ?? item.count ?? item.message}`}>{item.message}</li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 
 function Metric({ label, value }: { label: string; value: number }) {
   return (

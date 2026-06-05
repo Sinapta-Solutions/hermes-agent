@@ -805,6 +805,58 @@ def _handle_workflow_evidence(args: dict, **kw) -> str:
         return tool_error(f"kanban_workflow_evidence: {e}")
 
 
+def _handle_workflow_approval(args: dict, **kw) -> str:
+    """Request human approval for the current workflow step."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    reason = args.get("reason")
+    if not reason or not str(reason).strip():
+        return tool_error("reason is required")
+    requested_step = str(args.get("step_id") or "").strip() or None
+    worker_step = _worker_workflow_step_id(tid)
+    if worker_step and requested_step and requested_step != worker_step:
+        return tool_error(
+            f"worker is scoped to workflow step {worker_step}; refusing "
+            f"to request approval on {requested_step}"
+        )
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            task = kb.get_task(conn, tid)
+            if task is None:
+                return tool_error(f"task {tid} not found")
+            if worker_step and task.current_step_key and worker_step != task.current_step_key:
+                return tool_error(
+                    f"worker is scoped to workflow step {worker_step}; current task step is {task.current_step_key}"
+                )
+            step_id = requested_step or worker_step or task.current_step_key
+            if not step_id:
+                return tool_error(f"task {tid} has no current workflow step")
+            approval = kb.request_workflow_approval(
+                conn,
+                tid,
+                step_id,
+                reason=str(reason).strip(),
+                actor=os.environ.get("HERMES_PROFILE") or "worker",
+                run_id=_worker_run_id(tid),
+            )
+            return _ok(task_id=tid, step_id=step_id, approval=approval)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_workflow_approval: {e}")
+    except Exception as e:
+        logger.exception("kanban_workflow_approval failed")
+        return tool_error(f"kanban_workflow_approval: {e}")
+
+
 def _handle_comment(args: dict, **kw) -> str:
     """Append a comment to a task's thread."""
     tid = args.get("task_id")
@@ -830,8 +882,11 @@ def _handle_comment(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            cid = kb.add_comment(conn, tid, author=author, body=str(body))
-            return _ok(task_id=tid, comment_id=cid)
+            cid = kb.add_comment(conn, tid, author=author, body=str(body), intent=args.get("intent"))
+            payload = {"task_id": tid, "comment_id": cid}
+            if args.get("intent"):
+                payload["intent"] = str(args.get("intent")).strip().lower()
+            return _ok(**payload)
         finally:
             conn.close()
     except ValueError as e:
@@ -1280,6 +1335,34 @@ KANBAN_WORKFLOW_EVIDENCE_SCHEMA = {
 }
 
 
+KANBAN_WORKFLOW_APPROVAL_SCHEMA = {
+    "name": "kanban_workflow_approval",
+    "description": (
+        "Request human approval for the current workflowRoute step. "
+        "This creates a pending approval gate; it does not approve the worker's own step."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
+            "step_id": {
+                "type": "string",
+                "description": (
+                    "Workflow step id. Optional for workers; defaults to "
+                    "HERMES_KANBAN_WORKFLOW_STEP / task.current_step_key."
+                ),
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why this step needs human approval before it can pass.",
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["reason"],
+    },
+}
+
+
 KANBAN_COMMENT_SCHEMA = {
     "name": "kanban_comment",
     "description": (
@@ -1301,6 +1384,15 @@ KANBAN_COMMENT_SCHEMA = {
             "body": {
                 "type": "string",
                 "description": "Markdown-supported comment body.",
+            },
+            "intent": {
+                "type": "string",
+                "enum": ["resume", "interrupt"],
+                "description": (
+                    "Optional explicit operational intent. 'resume' asks the board to "
+                    "unblock/resume a blocked task; 'interrupt' marks the active run "
+                    "for operator interruption without killing the process directly."
+                ),
             },
             "board": _board_schema_prop(),
         },
@@ -1554,6 +1646,15 @@ registry.register(
     handler=_handle_workflow_evidence,
     check_fn=_check_kanban_mode,
     emoji="🧭",
+)
+
+registry.register(
+    name="kanban_workflow_approval",
+    toolset="kanban",
+    schema=KANBAN_WORKFLOW_APPROVAL_SCHEMA,
+    handler=_handle_workflow_approval,
+    check_fn=_check_kanban_mode,
+    emoji="🛂",
 )
 
 registry.register(

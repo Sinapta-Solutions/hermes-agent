@@ -15,18 +15,21 @@ import type {
   EnvVarInfo,
   HermesConfig,
   HermesConfigRecord,
+  KanbanActivityResponse,
   KanbanAssigneesResponse,
+  KanbanBlockersResponse,
   KanbanBoard,
   KanbanBoardsResponse,
   KanbanComment,
   KanbanCommentMutationResponse,
   KanbanCommentPayload,
   KanbanDispatcherStatusResponse,
+  KanbanRun,
   KanbanTask,
   KanbanTaskDetailResponse,
   KanbanTaskMutationResponse,
-
   KanbanTaskPayload,
+  KanbanTaskRunsResponse,
   KanbanTasksResponse,
   KanbanTaskUpdatePayload,
   KanbanWorkflowStepPayload,
@@ -87,7 +90,9 @@ export type {
   EnvVarInfo,
   HermesConfig,
   HermesConfigRecord,
+  KanbanActivityResponse,
   KanbanAssigneesResponse,
+  KanbanBlockersResponse,
   KanbanBoard,
   KanbanBoardsResponse,
   KanbanComment,
@@ -97,11 +102,13 @@ export type {
   KanbanDispatcherStatusResponse,
   KanbanEvent,
   KanbanFailure,
+  KanbanRun,
   KanbanStatus,
   KanbanTask,
   KanbanTaskDetailResponse,
   KanbanTaskMutationResponse,
   KanbanTaskPayload,
+  KanbanTaskRunsResponse,
   KanbanTasksResponse,
   KanbanTaskUpdatePayload,
   KanbanWorkflowEvidence,
@@ -211,6 +218,32 @@ export function getKanbanTaskDetail(boardSlug: string, taskId: string): Promise<
   })
 }
 
+export function getKanbanTaskRuns(boardSlug: string, taskId: string): Promise<KanbanRun[]> {
+  return window.hermesDesktop
+    .api<KanbanTaskRunsResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/runs`
+    })
+    .then(result => result.runs)
+}
+
+export function getKanbanTaskBlockers(boardSlug: string, taskId: string): Promise<KanbanBlockersResponse> {
+  return window.hermesDesktop.api<KanbanBlockersResponse>({
+    path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/blockers`
+  })
+}
+
+export function getKanbanTaskActivity(boardSlug: string, taskId: string, limit = 50): Promise<KanbanActivityResponse> {
+  return window.hermesDesktop.api<KanbanActivityResponse>({
+    path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/activity?limit=${limit}`
+  })
+}
+
+export function getKanbanBoardActivity(boardSlug: string, limit = 100): Promise<KanbanActivityResponse> {
+  return window.hermesDesktop.api<KanbanActivityResponse>({
+    path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/activity?limit=${limit}`
+  })
+}
+
 export function applyKanbanWorkflowPreset(
   boardSlug: string,
   taskId: string,
@@ -262,6 +295,37 @@ export function updateKanbanWorkflowStep(
   return window.hermesDesktop
     .api<KanbanTaskMutationResponse>({
       path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/workflow/steps/${encodeURIComponent(stepId)}`,
+      method: 'PATCH',
+      body
+    })
+    .then(result => result.task)
+}
+
+
+export function requestKanbanWorkflowApproval(
+  boardSlug: string,
+  taskId: string,
+  stepId: string,
+  body: { reason: string }
+): Promise<KanbanTask> {
+  return window.hermesDesktop
+    .api<KanbanTaskMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/workflow/steps/${encodeURIComponent(stepId)}/approval`,
+      method: 'POST',
+      body
+    })
+    .then(result => result.task)
+}
+
+export function resolveKanbanWorkflowApproval(
+  boardSlug: string,
+  taskId: string,
+  stepId: string,
+  body: { decision: 'approved' | 'rejected'; reason?: null | string }
+): Promise<KanbanTask> {
+  return window.hermesDesktop
+    .api<KanbanTaskMutationResponse>({
+      path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/tasks/${encodeURIComponent(taskId)}/workflow/steps/${encodeURIComponent(stepId)}/approval`,
       method: 'PATCH',
       body
     })

@@ -1692,6 +1692,40 @@ def _workspace_branch_from_body(body: Dict[str, Any], repo_path: Optional[str]) 
     return explicit or _detect_workspace_base_ref(repo_path)
 
 
+def _workspace_close_readiness(
+    *,
+    repo_path: Optional[str],
+    repo_exists: bool,
+    vault_path: Optional[str],
+    vault_exists: bool,
+    task_counts: Dict[str, int],
+) -> Dict[str, Any]:
+    blockers: List[Dict[str, Any]] = []
+    warnings: List[Dict[str, Any]] = []
+    open_count = sum(
+        int(count)
+        for status, count in task_counts.items()
+        if status not in {"done", "archived"}
+    )
+    if open_count:
+        blockers.append({"code": "open_tasks", "count": open_count, "message": f"{open_count} task(s) not done/archived"})
+    if repo_path and not repo_exists:
+        blockers.append({"code": "repo_missing", "path": repo_path, "message": "Repository path does not exist"})
+    if vault_path and not vault_exists:
+        blockers.append({"code": "vault_missing", "path": vault_path, "message": "Vault path does not exist"})
+    if not repo_path:
+        warnings.append({"code": "repo_not_configured", "message": "Repository path is not configured"})
+    if not vault_path:
+        warnings.append({"code": "vault_not_configured", "message": "Vault path is not configured"})
+    if repo_path and repo_exists:
+        path = Path(repo_path).expanduser()
+        if _git_output(str(path), ["rev-parse", "--is-inside-work-tree"]):
+            dirty = _git_output(str(path), ["status", "--porcelain"])
+            if dirty:
+                warnings.append({"code": "repo_dirty", "message": "Repository has uncommitted changes"})
+    return {"ready": not blockers, "blockers": blockers, "warnings": warnings}
+
+
 def _workspace_response(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],
@@ -1896,14 +1930,23 @@ def workspace_status(workspace_id: str):
     tasks = {task_row["status"]: task_row["count"] for task_row in task_rows}
     repo_path = row["repo_path"]
     vault_path = row["vault_path"]
+    repo_exists = bool(repo_path and Path(repo_path).exists())
+    vault_exists = bool(vault_path and Path(vault_path).exists())
     return {
         "object": "hermes.workspace.status",
         "workspace_id": workspace_id,
         "profile_count": profile_count,
         "event_count": event_count,
         "task_counts": tasks,
-        "repo_exists": bool(repo_path and Path(repo_path).exists()),
-        "vault_exists": bool(vault_path and Path(vault_path).exists()),
+        "repo_exists": repo_exists,
+        "vault_exists": vault_exists,
+        "close_readiness": _workspace_close_readiness(
+            repo_path=repo_path,
+            repo_exists=repo_exists,
+            vault_path=vault_path,
+            vault_exists=vault_exists,
+            task_counts=tasks,
+        ),
     }
 
 
@@ -2100,6 +2143,97 @@ def _event_response(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def _run_response(row: sqlite3.Row) -> Dict[str, Any]:
+    try:
+        metadata = json.loads(row["metadata"]) if row["metadata"] else None
+    except Exception:
+        metadata = row["metadata"]
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "profile": row["profile"],
+        "step_key": row["step_key"],
+        "status": row["status"],
+        "claim_lock": row["claim_lock"],
+        "claim_expires": row["claim_expires"],
+        "worker_pid": row["worker_pid"],
+        "max_runtime_seconds": row["max_runtime_seconds"],
+        "last_heartbeat_at": row["last_heartbeat_at"],
+        "started_at": row["started_at"],
+        "ended_at": row["ended_at"],
+        "outcome": row["outcome"],
+        "summary": row["summary"],
+        "metadata": metadata,
+        "error": row["error"],
+    }
+
+
+def _normalize_activity_kind(kind: str, payload: Any) -> str:
+    if kind == "created":
+        return "task.created"
+    if kind == "claimed":
+        return "task.claimed"
+    if kind in {"released", "force_released", "reclaimed"}:
+        return "task.released"
+    if kind in {"completed", "archived"}:
+        return f"task.{kind}"
+    if kind == "task.comment.created":
+        return "comment.added"
+    if kind == "task.comment.updated":
+        return "comment.updated"
+    if kind == "task.updated" and isinstance(payload, dict):
+        changes = payload.get("changes")
+        if isinstance(changes, dict) and "status" in changes:
+            return "task.status_changed"
+    return kind
+
+
+def _activity_payload(kind: str, payload: Any) -> Any:
+    if kind == "task.updated" and isinstance(payload, dict):
+        changes = payload.get("changes")
+        if isinstance(changes, dict) and "status" in changes:
+            return {"source": payload.get("source"), "status": changes.get("status"), "changes": changes}
+    return payload
+
+
+def _activity_event_response(row: sqlite3.Row) -> Dict[str, Any]:
+    event = _event_response(row)
+    kind = str(event.get("kind") or "")
+    payload = _activity_payload(kind, event.get("payload"))
+    return {
+        "id": event["id"],
+        "source": "event",
+        "kind": _normalize_activity_kind(kind, payload),
+        "raw_kind": kind,
+        "task_id": event["task_id"],
+        "task_title": _row_value(row, "task_title"),
+        "run_id": event.get("run_id"),
+        "payload": payload,
+        "created_at": event["created_at"],
+    }
+
+
+def _activity_comment_response(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "source": "comment",
+        "kind": "comment.added",
+        "raw_kind": "task.comment",
+        "task_id": row["task_id"],
+        "task_title": _row_value(row, "task_title"),
+        "comment_id": row["id"],
+        "author": row["author"],
+        "body": row["body"],
+        "payload": {"author": row["author"], "body": row["body"], "comment_id": row["id"]},
+        "created_at": row["created_at"],
+    }
+
+
+def _sorted_activity(items: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    safe_limit = min(max(int(limit or 50), 1), 200)
+    return sorted(items, key=lambda item: (int(item.get("created_at") or 0), int(item.get("id") or 0)), reverse=True)[:safe_limit]
+
+
 @app.get("/api/kanban/boards")
 def list_kanban_boards():
     boards_root = _kanban_boards_root()
@@ -2235,12 +2369,20 @@ def get_kanban_task(slug: str, task_id: str):
             (task_id, task_id),
         ).fetchall()
         runs = conn.execute(
-            "SELECT id, task_id, profile, status, started_at, ended_at, outcome, summary, error FROM task_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 20",
+            """
+            SELECT id, task_id, profile, step_key, status, claim_lock, claim_expires, worker_pid,
+                   max_runtime_seconds, last_heartbeat_at, started_at, ended_at, outcome, summary, metadata, error
+            FROM task_runs
+            WHERE task_id = ?
+            ORDER BY started_at DESC, id DESC
+            LIMIT 20
+            """,
             (task_id,),
         ).fetchall()
         event_items = [_event_response(row) for row in events]
-        run_items = [dict(row) for row in runs]
+        run_items = [_run_response(row) for row in runs]
         failures: List[Dict[str, Any]] = []
+
         if task["last_failure_error"]:
             failures.append(
                 {
@@ -2295,6 +2437,131 @@ def get_kanban_task(slug: str, task_id: str):
         conn.close()
 
 
+@app.get("/api/kanban/boards/{slug}/tasks/{task_id}/blockers")
+def list_kanban_task_blockers(slug: str, task_id: str):
+    from hermes_cli import kanban_db
+
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        blockers = kanban_db.unresolved_blockers_for_task(conn, task_id)
+        return {
+            "object": "hermes.kanban.blockers",
+            "board": slug,
+            "task_id": task_id,
+            "blocked": bool(blockers),
+            "blockers": blockers,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/kanban/boards/{slug}/tasks/{task_id}/runs")
+def list_kanban_task_runs(slug: str, task_id: str):
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        rows = conn.execute(
+            """
+            SELECT id, task_id, profile, step_key, status, claim_lock, claim_expires, worker_pid,
+                   max_runtime_seconds, last_heartbeat_at, started_at, ended_at, outcome, summary, metadata, error
+            FROM task_runs
+            WHERE task_id = ?
+            ORDER BY started_at DESC, id DESC
+            LIMIT 50
+            """,
+            (task_id,),
+        ).fetchall()
+        return {
+            "object": "hermes.kanban.task.runs",
+            "task_id": task_id,
+            "runs": [_run_response(row) for row in rows],
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/kanban/boards/{slug}/tasks/{task_id}/activity")
+def list_kanban_task_activity(slug: str, task_id: str, limit: int = 50):
+    conn = _connect_kanban_board(slug)
+    try:
+        task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        events = conn.execute(
+            """
+            SELECT e.*, t.title AS task_title
+            FROM task_events e
+            LEFT JOIN tasks t ON t.id = e.task_id
+            WHERE e.task_id = ?
+            ORDER BY e.created_at DESC, e.id DESC
+            LIMIT ?
+            """,
+            (task_id, min(max(int(limit or 50), 1), 200)),
+        ).fetchall()
+        comments = conn.execute(
+            """
+            SELECT c.id, c.task_id, c.author, c.body, c.created_at, t.title AS task_title
+            FROM task_comments c
+            LEFT JOIN tasks t ON t.id = c.task_id
+            WHERE c.task_id = ?
+            ORDER BY c.created_at DESC, c.id DESC
+            LIMIT ?
+            """,
+            (task_id, min(max(int(limit or 50), 1), 200)),
+        ).fetchall()
+        activity = [_activity_event_response(row) for row in events]
+        activity.extend(_activity_comment_response(row) for row in comments)
+        return {
+            "object": "hermes.kanban.activity",
+            "board": slug,
+            "task_id": task_id,
+            "activity": _sorted_activity(activity, limit),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/kanban/boards/{slug}/activity")
+def list_kanban_board_activity(slug: str, limit: int = 100):
+    conn = _connect_kanban_board(slug)
+    try:
+        safe_limit = min(max(int(limit or 100), 1), 200)
+        events = conn.execute(
+            """
+            SELECT e.*, t.title AS task_title
+            FROM task_events e
+            LEFT JOIN tasks t ON t.id = e.task_id
+            ORDER BY e.created_at DESC, e.id DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        comments = conn.execute(
+            """
+            SELECT c.id, c.task_id, c.author, c.body, c.created_at, t.title AS task_title
+            FROM task_comments c
+            LEFT JOIN tasks t ON t.id = c.task_id
+            ORDER BY c.created_at DESC, c.id DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        activity = [_activity_event_response(row) for row in events]
+        activity.extend(_activity_comment_response(row) for row in comments)
+        return {
+            "object": "hermes.kanban.activity",
+            "board": slug,
+            "activity": _sorted_activity(activity, safe_limit),
+        }
+    finally:
+        conn.close()
+
+
 @app.post("/api/kanban/boards/{slug}/tasks/{task_id}/comments")
 async def create_kanban_task_comment(slug: str, task_id: str, request: Request):
     try:
@@ -2307,27 +2574,18 @@ async def create_kanban_task_comment(slug: str, task_id: str, request: Request):
     if not comment_body:
         raise HTTPException(status_code=400, detail="Comment body is required")
     author = str(body.get("author") or "desktop").strip() or "desktop"
-    now = int(time.time())
+    intent = str(body.get("intent") or "").strip().lower() or None
+    from hermes_cli import kanban_db
+
     conn = _connect_kanban_board(slug)
     try:
         task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if task is None:
             raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
-        cursor = conn.execute(
-            "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
-            (task_id, author, comment_body, now),
-        )
-        comment_id = cursor.lastrowid
-        conn.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
-            (
-                task_id,
-                "task.comment.created",
-                json.dumps({"source": "desktop", "author": author, "comment_id": comment_id}, ensure_ascii=False),
-                now,
-            ),
-        )
-        conn.commit()
+        try:
+            comment_id = kanban_db.add_comment(conn, task_id, author=author, body=comment_body, intent=intent)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         row = conn.execute(
             "SELECT id, task_id, author, body, created_at FROM task_comments WHERE id = ?",
             (comment_id,),
@@ -2461,15 +2719,26 @@ async def update_kanban_task(slug: str, task_id: str, request: Request):
                 f"UPDATE tasks SET {assignments} WHERE id = ?",
                 (*updates.values(), task_id),
             )
+            event_time = int(time.time())
             conn.execute(
                 "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
                 (
                     task_id,
                     "task.updated",
                     json.dumps({"source": "desktop", "changes": changes}, ensure_ascii=False),
-                    int(time.time()),
+                    event_time,
                 ),
             )
+            if "status" in changes:
+                conn.execute(
+                    "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                    (
+                        task_id,
+                        "task.status_changed",
+                        json.dumps({"source": "desktop", "status": changes["status"]}, ensure_ascii=False),
+                        event_time,
+                    ),
+                )
             conn.commit()
 
         if workflow_route is not None:
@@ -2635,6 +2904,74 @@ async def update_kanban_task_workflow_step(slug: str, task_id: str, step_id: str
         conn.close()
 
 
+@app.post("/api/kanban/boards/{slug}/tasks/{task_id}/workflow/steps/{step_id}/approval")
+async def request_kanban_task_workflow_approval(slug: str, task_id: str, step_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid workflow approval payload")
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Approval reason is required")
+
+    conn = _connect_kanban_board(slug)
+    try:
+        if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        from hermes_cli import kanban_db
+
+        try:
+            kanban_db.request_workflow_approval(
+                conn,
+                task_id,
+                step_id,
+                reason=reason,
+                actor="desktop",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return {"object": "hermes.kanban.task", "task": _task_response(row)}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/kanban/boards/{slug}/tasks/{task_id}/workflow/steps/{step_id}/approval")
+async def resolve_kanban_task_workflow_approval(slug: str, task_id: str, step_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid workflow approval payload")
+    decision = str(body.get("decision") or "").strip().lower()
+    reason = str(body.get("reason") or "").strip() or None
+
+    conn = _connect_kanban_board(slug)
+    try:
+        if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"Kanban task not found: {task_id}")
+        from hermes_cli import kanban_db
+
+        try:
+            kanban_db.resolve_workflow_approval(
+                conn,
+                task_id,
+                step_id,
+                decision=decision,
+                actor="desktop",
+                reason=reason,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return {"object": "hermes.kanban.task", "task": _task_response(row)}
+    finally:
+        conn.close()
+
+
 @app.get("/api/kanban/boards/{slug}/dispatcher/status")
 def get_kanban_dispatcher_status(slug: str):
     conn = _connect_kanban_board(slug)
@@ -2657,6 +2994,16 @@ def get_kanban_dispatcher_status(slug: str):
             (now, heartbeat_cutoff),
         ).fetchone()[0]
         last_event_at = conn.execute("SELECT MAX(created_at) FROM task_events").fetchone()[0]
+        pending_approvals_count = 0
+        for route_row in conn.execute("SELECT workflow_route FROM tasks WHERE workflow_route IS NOT NULL AND status != 'archived'").fetchall():
+            route = kanban_db.normalize_workflow_route(route_row["workflow_route"])
+            if not route:
+                continue
+            pending_approvals_count += sum(
+                1
+                for step in route.get("steps", [])
+                if isinstance(step.get("approval"), dict) and step["approval"].get("status") == "pending"
+            )
         rows = conn.execute(
             """
             SELECT r.id, r.task_id, r.profile, r.step_key, r.status,
@@ -2679,6 +3026,7 @@ def get_kanban_dispatcher_status(slug: str):
             "ready_count": ready_count,
             "running_count": running_count,
             "stale_running_count": stale_running_count,
+            "pending_approvals_count": pending_approvals_count,
             "last_event_at": last_event_at,
             "active_runs": active_runs,
         }

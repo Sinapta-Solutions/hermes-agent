@@ -2479,6 +2479,9 @@ def normalize_workflow_route(route: Any) -> Optional[dict]:
             "retry_count": retry_count,
             "max_retries": max_retries,
         }
+        approval = raw_step.get("approval")
+        if isinstance(approval, dict):
+            step["approval"] = dict(approval)
         steps.append(step)
 
     current_step_id = route.get("current_step_id") or route.get("currentStepId")
@@ -2795,6 +2798,8 @@ def update_workflow_step(
             status = status.strip().lower()
             if status not in VALID_WORKFLOW_STEP_STATUSES:
                 raise ValueError(f"status must be one of {sorted(VALID_WORKFLOW_STEP_STATUSES)}")
+            if status in {"passed", "skipped"} and _workflow_step_has_pending_approval(step):
+                raise ValueError(f"workflow step {step_id} approval pending")
             step["status"] = status
             step.setdefault("timestamps", {})[f"{status}_at"] = int(time.time())
         if evidence:
@@ -2829,6 +2834,104 @@ def update_workflow_step(
             event_payload["run_id"] = int(run_id)
         _append_event(conn, task_id, "workflow.step.updated", event_payload, run_id=run_id)
     return route
+
+
+def _workflow_step_has_pending_approval(step: Optional[dict]) -> bool:
+    approval = step.get("approval") if isinstance(step, dict) else None
+    return isinstance(approval, dict) and approval.get("status") == "pending"
+
+
+def request_workflow_approval(
+    conn: sqlite3.Connection,
+    task_id: str,
+    step_id: str,
+    *,
+    reason: str,
+    actor: str = "cli",
+    run_id: Optional[int] = None,
+) -> dict:
+    clean_reason = str(reason or "").strip()
+    if not clean_reason:
+        raise ValueError("approval reason is required")
+    now = int(time.time())
+    with write_txn(conn):
+        row = conn.execute("SELECT workflow_route FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"unknown task {task_id}")
+        route = normalize_workflow_route(row["workflow_route"])
+        if not route:
+            raise ValueError(f"task {task_id} has no workflow route")
+        step = _workflow_step(route, step_id)
+        if not step:
+            raise ValueError(f"workflow step not found: {step_id}")
+        approval = {
+            "id": f"{task_id}:{step_id}:{now}",
+            "status": "pending",
+            "reason": clean_reason,
+            "requested_by": actor,
+            "requested_at": now,
+        }
+        if run_id is not None:
+            approval["run_id"] = int(run_id)
+        step["approval"] = approval
+        _workflow_update_task_route_locked(conn, task_id, route)
+        _append_event(
+            conn,
+            task_id,
+            "workflow.approval.requested",
+            {"step_id": step_id, "reason": clean_reason, "actor": actor},
+            run_id=run_id,
+        )
+    return approval
+
+
+def resolve_workflow_approval(
+    conn: sqlite3.Connection,
+    task_id: str,
+    step_id: str,
+    *,
+    decision: str,
+    actor: str = "cli",
+    reason: Optional[str] = None,
+) -> dict:
+    clean_decision = str(decision or "").strip().lower()
+    if clean_decision not in {"approved", "rejected"}:
+        raise ValueError("approval decision must be approved or rejected")
+    clean_reason = str(reason or "").strip() or None
+    now = int(time.time())
+    with write_txn(conn):
+        row = conn.execute("SELECT workflow_route, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"unknown task {task_id}")
+        route = normalize_workflow_route(row["workflow_route"])
+        if not route:
+            raise ValueError(f"task {task_id} has no workflow route")
+        step = _workflow_step(route, step_id)
+        if not step:
+            raise ValueError(f"workflow step not found: {step_id}")
+        approval = step.get("approval") if isinstance(step.get("approval"), dict) else {}
+        approval.update(
+            {
+                "status": clean_decision,
+                "decided_by": actor,
+                "decided_at": now,
+            }
+        )
+        if clean_reason:
+            approval["decision_reason"] = clean_reason
+        step["approval"] = approval
+        task_status = "blocked" if clean_decision == "rejected" else row["status"]
+        if clean_decision == "rejected":
+            step["status"] = "blocked"
+        _workflow_update_task_route_locked(conn, task_id, route, status=task_status)
+        _append_event(
+            conn,
+            task_id,
+            f"workflow.approval.{clean_decision}",
+            {"step_id": step_id, "actor": actor, "reason": clean_reason},
+            run_id=approval.get("run_id"),
+        )
+    return approval
 
 
 def record_workflow_evidence(
@@ -3225,6 +3328,34 @@ def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return [r["child_id"] for r in rows]
 
 
+def unresolved_blockers_for_task(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    """Return open parent tasks that currently block ``task_id``.
+
+    Existing ``task_links.parent_id -> child_id`` links are the blocker
+    model: a parent blocks its child until it is ``done`` or ``archived``.
+    """
+    rows = conn.execute(
+        """
+        SELECT t.id, t.title, t.status, t.assignee
+        FROM tasks t
+        JOIN task_links l ON l.parent_id = t.id
+        WHERE l.child_id = ?
+          AND t.status NOT IN ('done', 'archived')
+        ORDER BY t.created_at ASC, t.id ASC
+        """,
+        (task_id,),
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "assignee": row["assignee"],
+        }
+        for row in rows
+    ]
+
+
 def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Optional[str]]]:
     """Return ``(parent_id, result)`` for every done parent of ``task_id``."""
     rows = conn.execute(
@@ -3244,13 +3375,84 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
 # Comments & events
 # ---------------------------------------------------------------------------
 
+def _normalize_comment_intent(intent: Optional[str]) -> Optional[str]:
+    if intent is None:
+        return None
+    clean = str(intent or "").strip().lower()
+    if not clean:
+        return None
+    if clean not in {"resume", "interrupt"}:
+        raise ValueError("comment intent must be one of: resume, interrupt")
+    return clean
+
+
+def _apply_comment_intent(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    comment_id: int,
+    author: str,
+    intent: str,
+) -> None:
+    if intent == "resume":
+        applied = unblock_task(conn, task_id)
+        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        with write_txn(conn):
+            _append_event(
+                conn,
+                task_id,
+                "comment_intent",
+                {
+                    "intent": intent,
+                    "comment_id": comment_id,
+                    "author": author,
+                    "applied": bool(applied),
+                    "status": row["status"] if row else None,
+                },
+            )
+        return
+
+    if intent == "interrupt":
+        with write_txn(conn):
+            row = conn.execute(
+                "SELECT status, current_run_id FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            run_id = int(row["current_run_id"]) if row and row["current_run_id"] else None
+            applied = bool(row and row["status"] == "running" and run_id)
+            payload = {
+                "intent": intent,
+                "comment_id": comment_id,
+                "author": author,
+                "applied": applied,
+                "run_id": run_id,
+            }
+            _append_event(conn, task_id, "comment_intent", payload, run_id=run_id)
+            if applied:
+                _append_event(
+                    conn,
+                    task_id,
+                    "interrupt_requested",
+                    {"comment_id": comment_id, "author": author},
+                    run_id=run_id,
+                )
+
+
 def add_comment(
-    conn: sqlite3.Connection, task_id: str, author: str, body: str
+    conn: sqlite3.Connection,
+    task_id: str,
+    author: str,
+    body: str,
+    *,
+    intent: Optional[str] = None,
 ) -> int:
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
         raise ValueError("comment author is required")
+    clean_intent = _normalize_comment_intent(intent)
+    clean_author = author.strip()
+    clean_body = body.strip()
     now = int(time.time())
     with write_txn(conn):
         if not conn.execute(
@@ -3260,10 +3462,22 @@ def add_comment(
         cur = conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at) "
             "VALUES (?, ?, ?, ?)",
-            (task_id, author.strip(), body.strip(), now),
+            (task_id, clean_author, clean_body, now),
         )
-        _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
-        return int(cur.lastrowid or 0)
+        comment_id = int(cur.lastrowid or 0)
+        payload = {"author": clean_author, "len": len(clean_body)}
+        if clean_intent:
+            payload["intent"] = clean_intent
+        _append_event(conn, task_id, "commented", payload)
+    if clean_intent:
+        _apply_comment_intent(
+            conn,
+            task_id,
+            comment_id=comment_id,
+            author=clean_author,
+            intent=clean_intent,
+        )
+    return comment_id
 
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
@@ -3718,13 +3932,8 @@ def claim_task(
         # 'todo' here — recompute_ready will re-promote when the parents
         # actually finish. See RCA at
         # kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md.
-        undone = conn.execute(
-            "SELECT 1 FROM task_links l "
-            "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        if undone:
+        blockers = unresolved_blockers_for_task(conn, task_id)
+        if blockers:
             conn.execute(
                 "UPDATE tasks SET status = 'todo' "
                 "WHERE id = ? AND status = 'ready'",
@@ -3732,7 +3941,7 @@ def claim_task(
             )
             _append_event(
                 conn, task_id, "claim_rejected",
-                {"reason": "parents_not_done"},
+                {"reason": "unresolved_blockers", "blockers": [item["id"] for item in blockers]},
             )
             return None
         # Defensive: if a prior run somehow leaked (invariant violation from
@@ -4053,6 +4262,114 @@ def release_stale_claims(
     return reclaimed
 
 
+def release_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    claimer: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> bool:
+    """Voluntarily release a matching active claim back to ``ready``.
+
+    ``claimer`` must match the current ``claim_lock`` when provided. This
+    is the non-destructive worker handoff path; operator overrides use
+    ``force_release_task`` or ``reclaim_task``.
+    """
+    requested_claimer = claimer or os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
+    summary = (reason or "voluntary release").strip() or "voluntary release"
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, claim_lock FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if not row or row["status"] != "running" or not row["claim_lock"]:
+            return False
+        prev_lock = row["claim_lock"]
+        if requested_claimer and requested_claimer != prev_lock:
+            return False
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'ready', claim_lock = NULL, claim_expires = NULL,
+                   worker_pid = NULL, last_heartbeat_at = NULL
+             WHERE id = ?
+               AND status = 'running'
+               AND claim_lock IS ?
+            """,
+            (task_id, prev_lock),
+        )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="released",
+            status="released",
+            summary=summary,
+            metadata={"claimer": requested_claimer, "prev_lock": prev_lock},
+        )
+        _append_event(
+            conn,
+            task_id,
+            "released",
+            {"reason": summary, "claimer": requested_claimer, "prev_lock": prev_lock},
+            run_id=run_id,
+        )
+    return True
+
+
+def force_release_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str,
+    signal_fn=None,
+) -> bool:
+    """Operator override that releases any active claim back to ``ready``.
+
+    Requires a non-empty reason and records an audit event. If a worker PID
+    is attached, it is terminated before the release, matching reclaim
+    safety semantics.
+    """
+    clean_reason = str(reason or "").strip()
+    if not clean_reason:
+        return False
+    row = conn.execute(
+        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row or (row["status"] != "running" and row["claim_lock"] is None):
+        return False
+    prev_lock = row["claim_lock"]
+    termination = _terminate_reclaimed_worker(row["worker_pid"], prev_lock, signal_fn=signal_fn)
+    with write_txn(conn):
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'ready', claim_lock = NULL, claim_expires = NULL,
+                   worker_pid = NULL, last_heartbeat_at = NULL
+             WHERE id = ?
+               AND status IN ('running', 'ready', 'blocked')
+               AND claim_lock IS ?
+            """,
+            (task_id, prev_lock),
+        )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="force_released",
+            status="released",
+            summary=clean_reason,
+            metadata=termination,
+        )
+        payload = {"manual": True, "reason": clean_reason, "prev_lock": prev_lock}
+        payload.update(termination)
+        _append_event(conn, task_id, "force_released", payload, run_id=run_id)
+    return True
+
+
 def reclaim_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4365,6 +4682,16 @@ def complete_task(
                 return False
             route = normalize_workflow_route(wf_row["workflow_route"])
             if route:
+                current_step = _workflow_step(route, wf_row["current_step_key"])
+                if _workflow_step_has_pending_approval(current_step):
+                    _append_event(
+                        conn,
+                        task_id,
+                        "workflow.approval.blocked_completion",
+                        {"step_id": wf_row["current_step_key"]},
+                        run_id=wf_row["current_run_id"],
+                    )
+                    return False
                 run_id = _end_run(
                     conn, task_id,
                     outcome="completed", status="done",

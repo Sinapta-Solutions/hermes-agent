@@ -681,6 +681,43 @@ def test_workflow_evidence_records_worker_run_id(monkeypatch, worker_env):
         conn.close()
 
 
+def test_workflow_approval_request_records_worker_gate(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        kb.set_workflow_route(
+            conn,
+            worker_env,
+            {
+                "steps": [
+                    {"id": "planning", "title": "Planning", "assignee": "test-worker"},
+                ],
+            },
+        )
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_WORKFLOW_STEP", "planning")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "88")
+
+    out = kt._handle_workflow_approval({"reason": "needs human signoff"})
+    data = json.loads(out)
+    assert data["ok"] is True
+    assert data["step_id"] == "planning"
+    assert data["approval"]["status"] == "pending"
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        approval = task.workflow_route["steps"][0]["approval"]
+        assert approval["reason"] == "needs human signoff"
+        assert approval["run_id"] == 88
+    finally:
+        conn.close()
+
+
 def test_workflow_evidence_rejects_stale_worker_step(monkeypatch, worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
@@ -1908,3 +1945,22 @@ def test_board_param_in_all_schemas():
         assert "board" not in schema["parameters"].get("required", []), (
             f"{schema['name']} marks board as required; must be optional"
         )
+
+def test_comment_interrupt_intent_tool_records_event(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect() as conn:
+        kb.claim_task(conn, worker_env, claimer="host:worker")
+        run_id = kb.latest_run(conn, worker_env).id
+
+    out = kt._handle_comment({"task_id": worker_env, "body": "please interrupt", "intent": "interrupt"})
+    body = json.loads(out)
+    assert body["ok"] is True
+    assert body["intent"] == "interrupt"
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+        events = kb.list_events(conn, worker_env)
+    assert task.status == "running"
+    assert any(event.kind == "interrupt_requested" and event.run_id == run_id for event in events)

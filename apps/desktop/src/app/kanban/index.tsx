@@ -29,14 +29,16 @@ import {
   type KanbanBoard,
   type KanbanComment,
   type KanbanDispatcherStatusResponse,
-  type KanbanEvent,
   type KanbanFailure,
+  type KanbanRun,
   type KanbanStatus,
   type KanbanTask,
   type KanbanTaskDetailResponse,
   type KanbanTaskUpdatePayload,
   type KanbanWorkflowStepStatus,
   type KanbanWorkflowStepUpdatePayload,
+  requestKanbanWorkflowApproval,
+  resolveKanbanWorkflowApproval,
   updateKanbanTask,
   updateKanbanTaskComment,
   updateKanbanWorkflowStep
@@ -46,6 +48,8 @@ import { notify, notifyError } from '@/store/notifications'
 
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
+import { buildKanbanColumnView, getKanbanBoardDensity, nextKeyboardTaskId } from './board-density'
+import { groupKanbanRunTranscript, isKanbanTaskLive } from './runs'
 import {
   canUseRawKanbanStatusDrop,
   semanticStepStatusForKanbanDrop,
@@ -58,6 +62,8 @@ import {
 interface KanbanViewProps {
   setStatusbarItemGroup?: SetStatusbarItemGroup
 }
+
+type TimelineFilter = 'all' | TimelineItem['type']
 
 type TaskFormState = {
   assignee: string
@@ -111,10 +117,11 @@ const STATUSES: Array<{ accent: string; description: string; label: string; valu
   { value: 'done', label: 'Done', description: 'Concluído/revisado', accent: 'var(--ui-accent)' }
 ]
 
-const KANBAN_VISIBLE_CARD_LIMIT = 5
-const KANBAN_COLUMN_SCROLL_MAX_HEIGHT = `calc(${KANBAN_VISIBLE_CARD_LIMIT} * 8.5rem + ${KANBAN_VISIBLE_CARD_LIMIT - 1} * 0.5rem)`
+const KANBAN_STATUS_ORDER = STATUSES.map(status => status.value)
+
 const KANBAN_FAST_POLL_MS = 3000
 const KANBAN_IDLE_POLL_MS = 10000
+const KANBAN_BOARD_PREFS_STORAGE_KEY = 'mia-kanban-board-preferences'
 const JURISHUB_WORKFLOW_PRESET_ID = 'jurishub-standard'
 const UNASSIGNED_SELECT_VALUE = '__unassigned__'
 
@@ -127,12 +134,48 @@ const KANBAN_SELECT_CONTENT_CLASS =
 const KANBAN_SELECT_ITEM_CLASS =
   'text-(--ui-text-primary) focus:bg-(--ui-control-hover-background) focus:text-(--ui-text-primary) data-[state=checked]:bg-(--ui-control-hover-background)'
 
+type KanbanBoardColumnPreferences = {
+  expandedColdStatuses?: KanbanStatus[]
+  visibleLimits?: Partial<Record<KanbanStatus, number>>
+}
+
+function kanbanBoardPrefsKey(boardSlug: string) {
+  return `${KANBAN_BOARD_PREFS_STORAGE_KEY}:${boardSlug}`
+}
+
+function readKanbanBoardColumnPreferences(boardSlug: string): Required<KanbanBoardColumnPreferences> {
+  try {
+    const raw = window.localStorage.getItem(kanbanBoardPrefsKey(boardSlug))
+    const parsed = raw ? (JSON.parse(raw) as KanbanBoardColumnPreferences) : null
+
+    return {
+      expandedColdStatuses: parsed?.expandedColdStatuses ?? [],
+      visibleLimits: parsed?.visibleLimits ?? {}
+    }
+  } catch {
+    return { expandedColdStatuses: [], visibleLimits: {} }
+  }
+}
+
+function writeKanbanBoardColumnPreferences(boardSlug: string, preferences: Required<KanbanBoardColumnPreferences>) {
+  window.localStorage.setItem(kanbanBoardPrefsKey(boardSlug), JSON.stringify(preferences))
+}
+
+
+function isKanbanShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false
+  }
+
+  return Boolean(target.closest('input, textarea, select, button, [contenteditable="true"], [role="textbox"]'))
+}
+
 interface TimelineItem {
   body?: string
   key: string
   label: string
   meta?: string
-  payload?: KanbanEvent['payload'] | Record<string, unknown> | null | string
+  payload?: unknown
   time: number
   type: 'comment' | 'event' | 'failure' | 'run'
 }
@@ -179,7 +222,7 @@ function kanbanWorkspaceKind(value?: null | string) {
   return value === 'scratch' || value === 'dir' || value === 'worktree' ? value : 'scratch'
 }
 
-function latestRunTimestamp(run: Record<string, unknown>) {
+function latestRunTimestamp(run: { ended_at?: null | number; started_at?: null | number }) {
   const endedAt = typeof run.ended_at === 'number' ? run.ended_at : null
   const startedAt = typeof run.started_at === 'number' ? run.started_at : null
 
@@ -255,7 +298,7 @@ function latestTaskSignal(task: KanbanTask, nowSeconds: number) {
   return task.started_at ? `iniciado ${formatAgo(task.started_at, nowSeconds)}` : null
 }
 
-function formatPayload(value: KanbanEvent['payload'] | Record<string, unknown> | null | string | undefined) {
+function formatPayload(value: unknown) {
   if (!value) {
     return ''
   }
@@ -271,9 +314,6 @@ function formatPayload(value: KanbanEvent['payload'] | Record<string, unknown> |
   }
 }
 
-function taskCount(tasks: KanbanTask[], status: KanbanStatus) {
-  return tasks.filter(task => task.status === status).length
-}
 
 function splitWorkflowFormList(value: string) {
   return value
@@ -299,6 +339,9 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   const [form, setForm] = useState<TaskFormState>(EMPTY_FORM)
   const [createOpen, setCreateOpen] = useState(false)
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null)
+  const [expandedColdStatuses, setExpandedColdStatuses] = useState<KanbanStatus[]>([])
+  const [columnVisibleLimits, setColumnVisibleLimits] = useState<Partial<Record<KanbanStatus, number>>>({})
+  const [preferencesBoardSlug, setPreferencesBoardSlug] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000))
   const [saving, setSaving] = useState(false)
@@ -310,6 +353,51 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
   )
 
   const boardTenant = selectedBoard?.slug ? selectedBoard.slug.toLowerCase() : ''
+  const boardDensity = useMemo(() => getKanbanBoardDensity(tasks), [tasks])
+
+  useEffect(() => {
+    if (!selectedBoard?.slug) {
+      setExpandedColdStatuses([])
+      setColumnVisibleLimits({})
+      setPreferencesBoardSlug(null)
+
+      return
+    }
+
+    const preferences = readKanbanBoardColumnPreferences(selectedBoard.slug)
+    setExpandedColdStatuses(preferences.expandedColdStatuses)
+    setColumnVisibleLimits(preferences.visibleLimits)
+    setPreferencesBoardSlug(selectedBoard.slug)
+  }, [selectedBoard?.slug])
+
+  useEffect(() => {
+    if (!selectedBoard?.slug || preferencesBoardSlug !== selectedBoard.slug) {
+      return
+    }
+
+    writeKanbanBoardColumnPreferences(selectedBoard.slug, {
+      expandedColdStatuses,
+      visibleLimits: columnVisibleLimits
+    })
+  }, [columnVisibleLimits, expandedColdStatuses, preferencesBoardSlug, selectedBoard?.slug])
+
+  const toggleColdStatus = useCallback((status: KanbanStatus) => {
+    setExpandedColdStatuses(current =>
+      current.includes(status) ? current.filter(item => item !== status) : [...current, status]
+    )
+  }, [])
+
+  const showMoreInColumn = useCallback(
+    (status: KanbanStatus, total: number) => {
+      setColumnVisibleLimits(current => {
+        const currentLimit = current[status] ?? boardDensity.defaultPageSize
+        const nextLimit = currentLimit < 25 ? 25 : currentLimit < 50 ? 50 : total
+
+        return { ...current, [status]: Math.min(nextLimit, total) }
+      })
+    },
+    [boardDensity.defaultPageSize]
+  )
 
   const updateRouteQuery = useCallback(
     (next: { board?: null | string; task?: null | string }, replace = true) => {
@@ -493,6 +581,78 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     setCreateOpen(true)
   }, [boardTenant])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        createOpen ||
+        detailTaskId ||
+        isKanbanShortcutTarget(event.target)
+      ) {
+        return
+      }
+
+      if (!selectedBoard?.slug) {
+        return
+      }
+
+      if (event.key === 'ArrowDown' || event.key === 'ArrowRight' || event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+        event.preventDefault()
+
+        const nextId = nextKeyboardTaskId({
+          currentTaskId: selectedTaskId,
+          direction: event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 'next' : 'previous',
+          statusOrder: KANBAN_STATUS_ORDER,
+          tasks
+        })
+
+        if (nextId) {
+          setSelectedTaskId(nextId)
+        }
+
+        return
+      }
+
+      if (event.key === 'Enter' && selectedTaskId) {
+        event.preventDefault()
+        openTaskDetail(selectedTaskId)
+
+        return
+      }
+
+      if (event.key.toLowerCase() === 'n') {
+        event.preventDefault()
+        openCreateTask()
+
+        return
+      }
+
+      if (event.key.toLowerCase() === 'r') {
+        event.preventDefault()
+        void Promise.all([refreshTasks(selectedBoard.slug), refreshDispatcherStatus(selectedBoard.slug)]).catch(error =>
+          notifyError(error, 'Failed to refresh Kanban')
+        )
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [
+    createOpen,
+    detailTaskId,
+    openCreateTask,
+    openTaskDetail,
+    refreshDispatcherStatus,
+    refreshTasks,
+    selectedBoard?.slug,
+    selectedTaskId,
+    tasks
+  ])
+
   const submit = async () => {
     if (!selectedBoard) {
       notify({ title: 'Kanban', message: 'Nenhum board selecionado' })
@@ -650,91 +810,118 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
               status={dispatcherStatus}
             />
             <div className="grid grid-cols-7 gap-3">
-            {STATUSES.map(column => {
-              const columnTasks = tasks.filter(task => task.status === column.value)
+              {STATUSES.map(column => {
+                const columnView = buildKanbanColumnView({
+                  expandedStatuses: expandedColdStatuses,
+                  status: column.value,
+                  tasks,
+                  visibleLimit: columnVisibleLimits[column.value] ?? boardDensity.defaultPageSize
+                })
 
-              return (
-                <section
-                  className={cn(
-                    'min-h-[28rem] rounded-2xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 transition',
-                    draggingTaskId && 'border-(--ui-accent) bg-(--ui-bg-secondary)'
-                  )}
-                  key={column.value}
-                  onDragOver={event => {
-                    event.preventDefault()
-                    event.dataTransfer.dropEffect = 'move'
-                  }}
-                  onDrop={event => {
-                    event.preventDefault()
+                const isColdColumn = boardDensity.coldLaneStatuses.includes(column.value)
 
-                    const taskId =
-                      event.dataTransfer.getData('application/x-hermes-kanban-task') ||
-                      event.dataTransfer.getData('text/plain')
-
-                    setDraggingTaskId(null)
-
-                    if (taskId) {
-                      void moveTaskStatus(taskId, column.value)
-                    }
-                  }}
-                >
-                  <div className="mb-3 flex items-start justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-2 text-sm font-semibold text-(--ui-text-primary)">
-                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: column.accent }} />
-                        {column.label}
-                      </div>
-                      <div className="mt-1 text-[0.68rem] leading-tight text-(--ui-text-tertiary)">
-                        {column.description}
-                      </div>
-                    </div>
-                    <span className="rounded-full border border-(--ui-stroke-secondary) px-2 py-0.5 text-xs text-(--ui-accent)">
-                      {taskCount(tasks, column.value)}
-                    </span>
-                  </div>
-                  {columnTasks.length > KANBAN_VISIBLE_CARD_LIMIT && (
-                    <div className="mb-2 text-[0.68rem] text-(--ui-text-quaternary)">
-                      Mostrando 5 cards visíveis; role para ver mais {columnTasks.length - KANBAN_VISIBLE_CARD_LIMIT}.
-                    </div>
-                  )}
-                  <div
+                return (
+                  <section
                     className={cn(
-                      'flex flex-col gap-2 pr-1',
-                      columnTasks.length > KANBAN_VISIBLE_CARD_LIMIT && 'overflow-y-auto overscroll-contain'
+                      'rounded-2xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 transition',
+                      columnView.collapsed ? 'min-h-32' : 'min-h-[28rem]',
+                      draggingTaskId && 'border-(--ui-accent) bg-(--ui-bg-secondary)'
                     )}
-                    style={
-                      columnTasks.length > KANBAN_VISIBLE_CARD_LIMIT
-                        ? { maxHeight: KANBAN_COLUMN_SCROLL_MAX_HEIGHT }
-                        : undefined
-                    }
+                    key={column.value}
+                    onDragOver={event => {
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = 'move'
+                    }}
+                    onDrop={event => {
+                      event.preventDefault()
+
+                      const taskId =
+                        event.dataTransfer.getData('application/x-hermes-kanban-task') ||
+                        event.dataTransfer.getData('text/plain')
+
+                      setDraggingTaskId(null)
+
+                      if (taskId) {
+                        void moveTaskStatus(taskId, column.value)
+                      }
+                    }}
                   >
-                    {columnTasks.map(task => (
-                      <TaskCard
-                        active={selectedTask?.id === task.id}
-                        dragging={draggingTaskId === task.id}
-                        key={task.id}
-                        nowSeconds={nowSeconds}
-                        onDragEnd={() => setDraggingTaskId(null)}
-                        onDragStart={event => {
-                          event.dataTransfer.effectAllowed = 'move'
-                          event.dataTransfer.setData('application/x-hermes-kanban-task', task.id)
-                          event.dataTransfer.setData('text/plain', task.id)
-                          setDraggingTaskId(task.id)
-                        }}
-                        onOpenDetail={() => openTaskDetail(task.id)}
-                        onSelect={() => setSelectedTaskId(task.id)}
-                        task={task}
-                      />
-                    ))}
-                    {columnTasks.length === 0 && (
-                      <div className="rounded-lg border border-dashed border-(--ui-stroke-secondary) p-3 text-xs text-(--ui-text-quaternary)">
-                        Vazio
+                    <div className="mb-3 flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-2 text-sm font-semibold text-(--ui-text-primary)">
+                          <span className="h-2.5 w-2.5 rounded-full" style={{ background: column.accent }} />
+                          {column.label}
+                        </div>
+                        <div className="mt-1 text-[0.68rem] leading-tight text-(--ui-text-tertiary)">
+                          {column.description}
+                        </div>
                       </div>
+                      <span className="rounded-full border border-(--ui-stroke-secondary) px-2 py-0.5 text-xs text-(--ui-accent)">
+                        {columnView.total}
+                      </span>
+                    </div>
+                    {boardDensity.compact && isColdColumn && columnView.total > 0 && (
+                      <Button
+                        className="mb-2 h-7 w-full text-[0.68rem]"
+                        onClick={() => toggleColdStatus(column.value)}
+                        type="button"
+                        variant="secondary"
+                      >
+                        {columnView.collapsed ? `Expandir ${columnView.total} cards frios` : 'Colapsar coluna fria'}
+                      </Button>
                     )}
-                  </div>
-                </section>
-              )
-            })}
+                    {columnView.collapsed ? (
+                      <div className="rounded-lg border border-dashed border-(--ui-stroke-secondary) p-3 text-xs text-(--ui-text-quaternary)">
+                        Coluna fria colapsada. Drag/drop continua aceito aqui.
+                      </div>
+                    ) : (
+                      <>
+                        {columnView.truncated && (
+                          <div className="mb-2 text-[0.68rem] text-(--ui-text-quaternary)">
+                            Mostrando {columnView.visibleTasks.length} de {columnView.total}; há {columnView.hiddenCount} ocultos.
+                          </div>
+                        )}
+                        <div className="flex flex-col gap-2 pr-1">
+                          {columnView.visibleTasks.map(task => (
+                            <TaskCard
+                              active={selectedTask?.id === task.id}
+                              compact={columnView.compactCards}
+                              dragging={draggingTaskId === task.id}
+                              key={task.id}
+                              nowSeconds={nowSeconds}
+                              onDragEnd={() => setDraggingTaskId(null)}
+                              onDragStart={event => {
+                                event.dataTransfer.effectAllowed = 'move'
+                                event.dataTransfer.setData('application/x-hermes-kanban-task', task.id)
+                                event.dataTransfer.setData('text/plain', task.id)
+                                setDraggingTaskId(task.id)
+                              }}
+                              onOpenDetail={() => openTaskDetail(task.id)}
+                              onSelect={() => setSelectedTaskId(task.id)}
+                              task={task}
+                            />
+                          ))}
+                          {columnView.total === 0 && (
+                            <div className="rounded-lg border border-dashed border-(--ui-stroke-secondary) p-3 text-xs text-(--ui-text-quaternary)">
+                              Vazio
+                            </div>
+                          )}
+                        </div>
+                        {columnView.truncated && (
+                          <Button
+                            className="mt-2 h-8 w-full text-xs"
+                            onClick={() => showMoreInColumn(column.value, columnView.total)}
+                            type="button"
+                            variant="secondary"
+                          >
+                            Mostrar mais
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </section>
+                )
+              })}
             </div>
           </div>
         )}
@@ -801,24 +988,51 @@ function DispatcherStatusPanel({
   const healthy = status.dispatch_in_gateway && status.gateway_pid
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 text-xs">
-      <div className="flex flex-wrap items-center gap-2 text-(--ui-text-secondary)">
-        <span className={cn('rounded px-2 py-1', healthy ? 'bg-(--ui-bg-secondary) text-(--ui-green)' : 'bg-(--ui-bg-secondary) text-(--ui-red)')}>
-          dispatcher {healthy ? `ativo pid ${status.gateway_pid}` : 'sem gateway ativo'}
-        </span>
-        <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
-          dispatch_in_gateway={String(status.dispatch_in_gateway)}
-        </span>
-        <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
-          ready {status.ready_count} · running {status.running_count} · stale {status.stale_running_count}
-        </span>
-        <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
-          runs ativos {status.active_runs.length}
-        </span>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-(--ui-text-secondary)">
+          <span className={cn('rounded px-2 py-1', healthy ? 'bg-(--ui-bg-secondary) text-(--ui-green)' : 'bg-(--ui-bg-secondary) text-(--ui-red)')}>
+            dispatcher {healthy ? `ativo pid ${status.gateway_pid}` : 'sem gateway ativo'}
+          </span>
+          <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
+            dispatch_in_gateway={String(status.dispatch_in_gateway)}
+          </span>
+          <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
+            ready {status.ready_count} · running {status.running_count} · stale {status.stale_running_count}
+          </span>
+          <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
+            runs ativos {status.active_runs.length}
+          </span>
+          <span className={cn('rounded bg-(--ui-bg-secondary) px-2 py-1', status.pending_approvals_count > 0 ? 'text-(--ui-orange)' : 'text-(--ui-text-tertiary)')}>
+            approvals {status.pending_approvals_count}
+          </span>
+          <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-quaternary)">
+            ↑↓ seleciona · Enter abre · N novo · R refresh
+          </span>
+        </div>
+        <Button onClick={onRefresh} size="sm" type="button" variant="secondary">
+          Diagnóstico
+        </Button>
       </div>
-      <Button onClick={onRefresh} size="sm" type="button" variant="secondary">
-        Diagnóstico
-      </Button>
+      {status.active_runs.length > 0 && (
+        <div className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 text-xs">
+          <div className="mb-2 font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">Runs ativos</div>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {status.active_runs.map(run => (
+              <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-2" key={`${run.task_id}-${run.id}`}>
+                <div className="flex items-center justify-between gap-2 text-(--ui-text-primary)">
+                  <span className="line-clamp-1">{run.title}</span>
+                  <span className="rounded bg-(--ui-red) px-1.5 py-0.5 text-white">Live</span>
+                </div>
+                <div className="mt-1 text-(--ui-text-tertiary)">
+                  run {run.id} · {run.profile || 'perfil?'} · {run.step_key || 'sem etapa'}
+                </div>
+                <div className="mt-1 text-(--ui-text-quaternary)">heartbeat {formatTime(run.last_heartbeat_at)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -975,6 +1189,7 @@ function TaskDetailDialog({
   task: KanbanTask | null
 }) {
   const activeTask = detail?.task ?? task
+  const blockers = detail?.blockers ?? []
   const failures = detail?.failures ?? []
   const [commentBody, setCommentBody] = useState('')
   const [editForm, setEditForm] = useState<TaskFormState>(EMPTY_FORM)
@@ -992,7 +1207,13 @@ function TaskDetailDialog({
   const [updatingWorkflowStepId, setUpdatingWorkflowStepId] = useState<null | string>(null)
   const [applyingWorkflowPreset, setApplyingWorkflowPreset] = useState(false)
   const activeTaskId = activeTask?.id ?? null
+  const [timelineFilter, setTimelineFilter] = useState<TimelineFilter>('all')
   const timeline = useMemo(() => buildTimeline(detail), [detail])
+
+  const filteredTimeline = useMemo(
+    () => (timelineFilter === 'all' ? timeline : timeline.filter(item => item.type === timelineFilter)),
+    [timeline, timelineFilter]
+  )
 
   useEffect(() => {
     if (!open || !activeTaskId) {
@@ -1082,12 +1303,13 @@ function TaskDetailDialog({
     }
   }
 
-  const addComment = async () => {
+  const addComment = async (intent?: 'interrupt' | 'resume') => {
     if (!boardSlug || !activeTask) {
       return
     }
 
-    const body = commentBody.trim()
+    const fallbackBody = intent === 'resume' ? 'Retomar card' : intent === 'interrupt' ? 'Solicitar interrupção do run ativo' : ''
+    const body = commentBody.trim() || fallbackBody
 
     if (!body) {
       notify({ title: 'Kanban', message: 'Comentário vazio' })
@@ -1098,10 +1320,13 @@ function TaskDetailDialog({
     setSavingComment(true)
 
     try {
-      await createKanbanTaskComment(boardSlug, activeTask.id, { author: 'desktop', body })
+      await createKanbanTaskComment(boardSlug, activeTask.id, { author: 'desktop', body, ...(intent ? { intent } : {}) })
       setCommentBody('')
       await onRefreshDetail(activeTask.id)
-      notify({ title: 'Kanban', message: 'Comentário adicionado' })
+      notify({
+        title: 'Kanban',
+        message: intent === 'resume' ? 'Retomada solicitada' : intent === 'interrupt' ? 'Interrupção solicitada' : 'Comentário adicionado'
+      })
     } catch (error) {
       notifyError(error, 'Failed to create Kanban comment')
     } finally {
@@ -1257,6 +1482,47 @@ function TaskDetailDialog({
     }
   }
 
+  const requestWorkflowApproval = async (stepId: string) => {
+    if (!boardSlug || !activeTask) {
+      return
+    }
+
+    setUpdatingWorkflowStepId(stepId)
+
+    try {
+      const updated = await requestKanbanWorkflowApproval(boardSlug, activeTask.id, stepId, {
+        reason: `Gate solicitado pelo Desktop para ${stepId}`
+      })
+
+      onTaskUpdated(updated)
+      await onRefreshDetail(updated.id)
+      notify({ title: 'Kanban', message: `Approval solicitado em ${stepId}` })
+    } catch (error) {
+      notifyError(error, 'Failed to request Kanban workflow approval')
+    } finally {
+      setUpdatingWorkflowStepId(null)
+    }
+  }
+
+  const resolveWorkflowApproval = async (stepId: string, decision: 'approved' | 'rejected') => {
+    if (!boardSlug || !activeTask) {
+      return
+    }
+
+    setUpdatingWorkflowStepId(stepId)
+
+    try {
+      const updated = await resolveKanbanWorkflowApproval(boardSlug, activeTask.id, stepId, { decision })
+      onTaskUpdated(updated)
+      await onRefreshDetail(updated.id)
+      notify({ title: 'Kanban', message: `Approval ${decision === 'approved' ? 'aprovado' : 'rejeitado'} em ${stepId}` })
+    } catch (error) {
+      notifyError(error, 'Failed to resolve Kanban workflow approval')
+    } finally {
+      setUpdatingWorkflowStepId(null)
+    }
+  }
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="flex h-[min(92vh,58rem)] max-h-[92vh] max-w-6xl flex-col overflow-hidden border-(--ui-stroke-secondary) bg-(--ui-chat-bubble-background) p-0 text-(--ui-text-primary)">
@@ -1380,6 +1646,26 @@ function TaskDetailDialog({
                 </div>
               </AccordionBlock>
 
+              <AccordionBlock defaultOpen={blockers.length > 0} title={`Blockers (${blockers.length})`}>
+                <div className="space-y-2">
+                  {blockers.map(blocker => (
+                    <div
+                      className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3 text-xs"
+                      key={blocker.id}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-(--ui-text-primary)">
+                        <span className="font-medium">{blocker.title}</span>
+                        <span className="rounded bg-(--ui-orange) px-1.5 py-0.5 text-(--ui-bg-primary)">{blocker.status}</span>
+                      </div>
+                      <div className="mt-1 text-(--ui-text-tertiary)">
+                        {blocker.id} · {blocker.assignee || 'sem perfil'}
+                      </div>
+                    </div>
+                  ))}
+                  {!blockers.length && <div className="text-xs text-(--ui-text-quaternary)">Sem blockers abertos.</div>}
+                </div>
+              </AccordionBlock>
+
               <WorkflowRoutePanel
                 applyingPreset={applyingWorkflowPreset}
                 assignees={assignees}
@@ -1388,6 +1674,8 @@ function TaskDetailDialog({
                 onApplyPreset={() => void applyWorkflowPreset()}
                 onEvidenceBodyChange={setWorkflowEvidenceBody}
                 onRecordEvidence={() => void addWorkflowEvidence()}
+                onRequestApproval={stepId => void requestWorkflowApproval(stepId)}
+                onResolveApproval={(stepId, decision) => void resolveWorkflowApproval(stepId, decision)}
                 onStepFormChange={setWorkflowStepForm}
                 onUpdateStep={(stepId, payload) => void updateWorkflowStep(stepId, payload)}
                 savingEvidence={savingWorkflowEvidence}
@@ -1397,12 +1685,27 @@ function TaskDetailDialog({
                 updatingStepId={updatingWorkflowStepId}
               />
 
-              <AccordionBlock defaultOpen title={`Atividade recente (${timeline.length})`}>
-                <div className="space-y-2">
-                  {timeline.slice(0, 8).map(item => (
-                    <TimelineCard item={item} key={item.key} />
-                  ))}
-                  {!timeline.length && <div className="text-xs text-(--ui-text-quaternary)">Sem atividade ainda.</div>}
+              <AccordionBlock defaultOpen title={`Atividade recente (${filteredTimeline.length}/${timeline.length})`}>
+                <div className="space-y-3">
+                  <div className="flex flex-wrap gap-2">
+                    {(['all', 'event', 'comment', 'run', 'failure'] as TimelineFilter[]).map(filter => (
+                      <Button
+                        className="h-7 px-2 text-[0.68rem]"
+                        key={filter}
+                        onClick={() => setTimelineFilter(filter)}
+                        type="button"
+                        variant={timelineFilter === filter ? 'default' : 'secondary'}
+                      >
+                        {filter === 'all' ? 'todos' : filter}
+                      </Button>
+                    ))}
+                  </div>
+                  <div className="space-y-2">
+                    {filteredTimeline.map(item => (
+                      <TimelineCard item={item} key={item.key} />
+                    ))}
+                    {!filteredTimeline.length && <div className="text-xs text-(--ui-text-quaternary)">Sem atividade para este filtro.</div>}
+                  </div>
                 </div>
               </AccordionBlock>
 
@@ -1465,7 +1768,25 @@ function TaskDetailDialog({
                       placeholder="Adicionar comentário operacional…"
                       value={commentBody}
                     />
-                    <div className="mt-2 flex justify-end">
+                    <div className="mt-2 flex flex-wrap justify-end gap-2">
+                      <Button
+                        disabled={savingComment || activeTask.status !== 'blocked'}
+                        onClick={() => void addComment('resume')}
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                      >
+                        Retomar
+                      </Button>
+                      <Button
+                        disabled={savingComment || !activeTask.current_run_id}
+                        onClick={() => void addComment('interrupt')}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        Interromper run
+                      </Button>
                       <Button disabled={savingComment} onClick={() => void addComment()} size="sm" type="button">
                         {savingComment ? 'Enviando…' : 'Comentar'}
                       </Button>
@@ -1528,6 +1849,8 @@ function WorkflowRoutePanel({
   onApplyPreset,
   onEvidenceBodyChange,
   onRecordEvidence,
+  onRequestApproval,
+  onResolveApproval,
   onStepFormChange,
   onUpdateStep,
   savingEvidence,
@@ -1543,6 +1866,8 @@ function WorkflowRoutePanel({
   onApplyPreset: () => void
   onEvidenceBodyChange: (value: string) => void
   onRecordEvidence: () => void
+  onRequestApproval: (stepId: string) => void
+  onResolveApproval: (stepId: string, decision: 'approved' | 'rejected') => void
   onStepFormChange: React.Dispatch<React.SetStateAction<WorkflowStepFormState>>
   onUpdateStep: (stepId: string, payload: KanbanWorkflowStepUpdatePayload) => void
   savingEvidence: boolean
@@ -1587,6 +1912,8 @@ function WorkflowRoutePanel({
         {route.steps.map(step => {
           const active = step.id === currentStep?.id
           const evidence = step.evidence ?? []
+          const approval = step.approval
+          const approvalPending = approval?.status === 'pending'
 
           return (
             <div
@@ -1608,7 +1935,13 @@ function WorkflowRoutePanel({
               <div className="mt-1 text-(--ui-text-tertiary)">
                 tipo {step.type || 'custom'} · retry {step.retry_count ?? 0}/{step.max_retries ?? '∞'}
               </div>
-              <div className="mt-3 grid gap-2 md:grid-cols-[10rem_1fr_auto_auto]">
+              {approval?.status && (
+                <div className="mt-2 rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-2 text-(--ui-text-tertiary)">
+                  Approval: <span className="text-(--ui-accent)">{approval.status}</span>
+                  {approval.reason ? ` · ${approval.reason}` : ''}
+                </div>
+              )}
+              <div className="mt-3 grid gap-2 md:grid-cols-[10rem_1fr_auto_auto_auto_auto_auto]">
                 <Select
                   disabled={updatingStepId === step.id}
                   onValueChange={value => onUpdateStep(step.id, { status: value as KanbanWorkflowStepStatus })}
@@ -1661,6 +1994,33 @@ function WorkflowRoutePanel({
                   variant="outline"
                 >
                   Bloquear
+                </Button>
+                <Button
+                  disabled={updatingStepId === step.id || approvalPending}
+                  onClick={() => onRequestApproval(step.id)}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Approval
+                </Button>
+                <Button
+                  disabled={updatingStepId === step.id || !approvalPending}
+                  onClick={() => onResolveApproval(step.id, 'approved')}
+                  size="sm"
+                  type="button"
+                  variant="secondary"
+                >
+                  Aprovar
+                </Button>
+                <Button
+                  disabled={updatingStepId === step.id || !approvalPending}
+                  onClick={() => onResolveApproval(step.id, 'rejected')}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Rejeitar
                 </Button>
               </div>
               {!!step.depends_on?.length && (
@@ -1778,6 +2138,7 @@ function WorkflowRoutePanel({
 
 function TaskCard({
   active,
+  compact,
   dragging,
   nowSeconds,
   onDragEnd,
@@ -1787,6 +2148,7 @@ function TaskCard({
   task
 }: {
   active: boolean
+  compact: boolean
   dragging: boolean
   nowSeconds: number
   onDragEnd: () => void
@@ -1796,6 +2158,7 @@ function TaskCard({
   task: KanbanTask
 }) {
   const signal = latestTaskSignal(task, nowSeconds)
+  const live = isKanbanTaskLive(task, nowSeconds)
   const currentStep = workflowCurrentStepForTask(task)
   const workflow = workflowProgress(task)
   const evidence = workflowEvidencePreview(currentStep)
@@ -1803,7 +2166,8 @@ function TaskCard({
   return (
     <div
       className={cn(
-        'rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3 text-left shadow-sm transition hover:border-(--ui-accent) hover:bg-(--ui-control-hover-background)',
+        'rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-left shadow-sm transition hover:border-(--ui-accent) hover:bg-(--ui-control-hover-background)',
+        compact ? 'p-2' : 'p-3',
         active && 'border-(--ui-accent) ring-1 ring-(--ui-accent)',
         dragging && 'opacity-55 ring-1 ring-(--ui-accent)'
       )}
@@ -1831,11 +2195,12 @@ function TaskCard({
       tabIndex={0}
     >
       <div className="line-clamp-2 text-sm font-medium text-(--ui-text-primary)">{task.title}</div>
-      {task.body && (
+      {!compact && task.body && (
         <div className="mt-2 line-clamp-3 text-xs leading-relaxed text-(--ui-text-tertiary)">{task.body}</div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[0.68rem] text-(--ui-text-tertiary)">
         <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5">{task.assignee || 'unassigned'}</span>
+        {live && <span className="rounded bg-(--ui-red) px-1.5 py-0.5 text-white">Live</span>}
         {workflow.total > 0 && (
           <span className="rounded bg-(--ui-bg-primary) px-1.5 py-0.5 text-(--ui-cyan)">
             wf {currentStep?.id ?? '—'} {workflow.passed}/{workflow.total}
@@ -1964,29 +2329,31 @@ function FailureCard({ failure }: { failure: KanbanFailure }) {
   )
 }
 
-function RunCard({ run }: { run: Record<string, unknown> }) {
-  const status = String(run.status ?? 'run')
-  const startedAt = typeof run.started_at === 'number' ? run.started_at : null
-  const endedAt = typeof run.ended_at === 'number' ? run.ended_at : null
+function RunCard({ run }: { run: KanbanRun }) {
+  const transcriptGroups = groupKanbanRunTranscript(run as unknown as Record<string, unknown>)
 
   return (
     <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2 text-(--ui-text-primary)">
         <span>
-          Run {String(run.id ?? '—')} · {status}
+          Run {run.id} · {run.status}
+          {run.step_key ? ` · ${run.step_key}` : ''}
         </span>
         <span className="text-(--ui-text-quaternary)">
-          {formatTime(startedAt)}
-          {endedAt ? ` → ${formatTime(endedAt)}` : ''}
+          {formatTime(run.started_at)}
+          {run.ended_at ? ` → ${formatTime(run.ended_at)}` : ''}
         </span>
       </div>
-      {run.summary ? (
-        <pre className="mt-2 whitespace-pre-wrap break-words text-(--ui-text-secondary)">{String(run.summary)}</pre>
-      ) : null}
-      {run.error ? (
-        <pre className="mt-2 whitespace-pre-wrap break-words text-(--ui-red)">{String(run.error)}</pre>
-      ) : null}
-      <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-(--ui-bg-secondary) p-2 text-(--ui-text-tertiary)">
+      {run.profile && <div className="mt-1 text-(--ui-text-tertiary)">Perfil: {run.profile}</div>}
+      <div className="mt-2 space-y-2">
+        {transcriptGroups.map((group, index) => (
+          <div className="rounded bg-(--ui-bg-secondary) p-2" key={`${group.kind}-${index}`}>
+            <div className="mb-1 text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-(--ui-accent)">{group.kind}</div>
+            <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words text-(--ui-text-secondary)">{group.text}</pre>
+          </div>
+        ))}
+      </div>
+      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-(--ui-bg-secondary) p-2 text-(--ui-text-tertiary)">
         {JSON.stringify(run, null, 2)}
       </pre>
     </div>

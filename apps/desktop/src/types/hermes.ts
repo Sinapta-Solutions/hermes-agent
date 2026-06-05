@@ -30,7 +30,21 @@ export interface WorkspacePayload {
   vault_path?: null | string
 }
 
+export interface WorkspaceCloseReadinessItem {
+  code: string
+  count?: number
+  message: string
+  path?: string
+}
+
+export interface WorkspaceCloseReadiness {
+  blockers: WorkspaceCloseReadinessItem[]
+  ready: boolean
+  warnings: WorkspaceCloseReadinessItem[]
+}
+
 export interface WorkspaceStatus {
+  close_readiness?: WorkspaceCloseReadiness
   event_count: number
   object: 'hermes.workspace.status'
   profile_count: number
@@ -88,10 +102,23 @@ export interface KanbanWorkflowEvidence {
 
 export type KanbanWorkflowStepStatus = 'pending' | 'ready' | 'running' | 'passed' | 'blocked' | 'failed' | 'skipped'
 
+export interface KanbanWorkflowApproval {
+  decided_at?: null | number
+  decided_by?: null | string
+  decision_reason?: null | string
+  id?: null | string
+  reason?: null | string
+  requested_at?: null | number
+  requested_by?: null | string
+  run_id?: null | number
+  status?: null | 'approved' | 'pending' | 'rejected'
+}
+
 export interface KanbanWorkflowStep {
   assignee?: null | string
   depends_on?: string[]
   evidence?: KanbanWorkflowEvidence[]
+  approval?: KanbanWorkflowApproval
   id: string
   max_retries?: null | number
   retry_count?: number
@@ -202,6 +229,28 @@ export interface KanbanEvent {
   task_id: string
 }
 
+export interface KanbanActivityItem {
+  author?: string
+  body?: string
+  comment_id?: number
+  created_at: number
+  id: number
+  kind: string
+  payload?: unknown
+  raw_kind?: string
+  run_id?: null | number
+  source: 'comment' | 'event'
+  task_id: string
+  task_title?: null | string
+}
+
+export interface KanbanActivityResponse {
+  activity: KanbanActivityItem[]
+  board: string
+  object: 'hermes.kanban.activity'
+  task_id?: string
+}
+
 export interface KanbanComment {
   author: string
   body: string
@@ -213,6 +262,7 @@ export interface KanbanComment {
 export interface KanbanCommentPayload {
   author?: string
   body: string
+  intent?: 'interrupt' | 'resume'
 }
 
 export interface KanbanCommentMutationResponse {
@@ -234,13 +284,54 @@ export interface KanbanFailure {
   summary?: null | string
 }
 
+export interface KanbanRun {
+  claim_expires?: null | number
+  claim_lock?: null | string
+  ended_at?: null | number
+  error?: null | string
+  id: number
+  last_heartbeat_at?: null | number
+  max_runtime_seconds?: null | number
+  metadata?: null | Record<string, unknown> | string
+  outcome?: null | string
+  profile?: null | string
+  started_at: number
+  status: string
+  step_key?: null | string
+  summary?: null | string
+  task_id: string
+  worker_pid?: null | number
+}
+
+export interface KanbanTaskRunsResponse {
+  object: 'hermes.kanban.task.runs'
+  runs: KanbanRun[]
+  task_id: string
+}
+
+export interface KanbanBlocker {
+  assignee?: null | string
+  id: string
+  status: KanbanStatus
+  title: string
+}
+
+export interface KanbanBlockersResponse {
+  blocked: boolean
+  blockers: KanbanBlocker[]
+  board: string
+  object: 'hermes.kanban.blockers'
+  task_id: string
+}
+
 export interface KanbanTaskDetailResponse {
+  blockers?: KanbanBlocker[]
   comments: KanbanComment[]
   events: KanbanEvent[]
   failures?: KanbanFailure[]
   links: Array<{ child_id: string; parent_id: string }>
   object: 'hermes.kanban.task.detail'
-  runs: Array<Record<string, unknown>>
+  runs: KanbanRun[]
   task: KanbanTask
 }
 
@@ -270,6 +361,7 @@ export interface KanbanDispatcherStatusResponse {
   gateway_pid?: null | number
   last_event_at?: null | number
   object: 'hermes.kanban.dispatcher_status'
+  pending_approvals_count: number
   ready_count: number
   running_count: number
   stale_running_count: number

@@ -340,6 +340,22 @@ def test_desktop_kanban_dispatcher_status_endpoint_reports_counts(tmp_path, monk
         json={"title": "running task", "status": "running", "assignee": "worker"},
     )
     assert running.status_code == 201
+    workflow = client.post(
+        "/api/kanban/boards/disp/tasks",
+        headers=headers,
+        json={
+            "title": "approval task",
+            "workflowRoute": {"steps": [{"id": "plan", "title": "Plan", "assignee": "worker"}]},
+        },
+    )
+    assert workflow.status_code == 201
+    task_id = workflow.json()["task"]["id"]
+    requested = client.post(
+        f"/api/kanban/boards/disp/tasks/{task_id}/workflow/steps/plan/approval",
+        headers=headers,
+        json={"reason": "ops gate"},
+    )
+    assert requested.status_code == 200
 
     status = client.get("/api/kanban/boards/disp/dispatcher/status", headers=headers)
     assert status.status_code == 200
@@ -349,4 +365,319 @@ def test_desktop_kanban_dispatcher_status_endpoint_reports_counts(tmp_path, monk
     assert body["ready_count"] >= 1
     assert body["running_count"] >= 1
     assert body["stale_running_count"] == 0
+    assert body["pending_approvals_count"] == 1
     assert isinstance(body["active_runs"], list)
+
+def test_desktop_kanban_task_runs_endpoint_returns_ordered_run_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    db_path = _seed_board(tmp_path, slug="runs")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+
+    created = client.post(
+        "/api/kanban/boards/runs/tasks",
+        headers=headers,
+        json={"title": "run ledger", "status": "ready"},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO task_runs (
+                task_id, profile, step_key, status, claim_lock, claim_expires, worker_pid,
+                max_runtime_seconds, last_heartbeat_at, started_at, ended_at, outcome, summary, metadata, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                "worker-a",
+                "build",
+                "done",
+                "old-lock",
+                1010,
+                123,
+                900,
+                1005,
+                1000,
+                1020,
+                "completed",
+                "old summary",
+                json.dumps({"groups": [{"kind": "final", "text": "ok"}]}),
+                None,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO task_runs (
+                task_id, profile, step_key, status, claim_lock, claim_expires, worker_pid,
+                max_runtime_seconds, last_heartbeat_at, started_at, ended_at, outcome, summary, metadata, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                "worker-b",
+                "review",
+                "running",
+                "new-lock",
+                2020,
+                456,
+                900,
+                2010,
+                2000,
+                None,
+                None,
+                None,
+                json.dumps({"groups": [{"kind": "tool", "text": "pytest"}]}),
+                None,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = client.get(f"/api/kanban/boards/runs/tasks/{task_id}/runs", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "hermes.kanban.task.runs"
+    assert body["task_id"] == task_id
+    assert [run["profile"] for run in body["runs"]] == ["worker-b", "worker-a"]
+    assert body["runs"][0]["metadata"] == {"groups": [{"kind": "tool", "text": "pytest"}]}
+    assert body["runs"][0]["worker_pid"] == 456
+    assert body["runs"][1]["summary"] == "old summary"
+
+def test_desktop_kanban_activity_endpoint_orders_normalized_timeline(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="activity")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+
+    created = client.post(
+        "/api/kanban/boards/activity/tasks",
+        headers=headers,
+        json={"title": "activity task", "status": "ready"},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+
+    updated = client.patch(
+        f"/api/kanban/boards/activity/tasks/{task_id}",
+        headers=headers,
+        json={"status": "blocked"},
+    )
+    assert updated.status_code == 200
+
+    comment = client.post(
+        f"/api/kanban/boards/activity/tasks/{task_id}/comments",
+        headers=headers,
+        json={"author": "operator", "body": "blocked on review"},
+    )
+    assert comment.status_code == 201
+
+    response = client.get(f"/api/kanban/boards/activity/tasks/{task_id}/activity", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "hermes.kanban.activity"
+    assert body["task_id"] == task_id
+    kinds = [item["kind"] for item in body["activity"]]
+    assert "task.status_changed" in kinds
+    assert "comment.added" in kinds
+    status_item = next(item for item in body["activity"] if item["kind"] == "task.status_changed")
+    assert status_item["payload"]["status"] == {"from": "ready", "to": "blocked"}
+    assert body["activity"] == sorted(body["activity"], key=lambda item: (item["created_at"], item["id"]), reverse=True)
+
+    board_response = client.get("/api/kanban/boards/activity/activity", headers=headers)
+    assert board_response.status_code == 200
+    assert any(item["task_id"] == task_id for item in board_response.json()["activity"])
+
+def test_desktop_kanban_blockers_endpoint_returns_unresolved_parents(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="blockers")
+
+    from hermes_cli import kanban_db
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    with kanban_db.connect(board="blockers") as conn:
+        blocker = kanban_db.create_task(conn, title="blocking work", assignee="agent-a", board="blockers")
+        child = kanban_db.create_task(conn, title="blocked work", assignee="agent-b", parents=[blocker], board="blockers")
+
+    client = TestClient(app)
+    response = client.get(
+        f"/api/kanban/boards/blockers/tasks/{child}/blockers",
+        headers={"X-Hermes-Session-Token": _SESSION_TOKEN},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "hermes.kanban.blockers"
+    assert body["blocked"] is True
+    assert body["blockers"] == [
+        {"id": blocker, "title": "blocking work", "status": "ready", "assignee": "agent-a"}
+    ]
+
+    with kanban_db.connect(board="blockers") as conn:
+        kanban_db.claim_task(conn, blocker)
+        kanban_db.complete_task(conn, blocker, result="ok")
+
+    response = client.get(
+        f"/api/kanban/boards/blockers/tasks/{child}/blockers",
+        headers={"X-Hermes-Session-Token": _SESSION_TOKEN},
+    )
+    assert response.status_code == 200
+    assert response.json()["blocked"] is False
+    assert response.json()["blockers"] == []
+
+def test_desktop_kanban_comment_resume_intent_updates_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="comment-intent")
+
+    from hermes_cli import kanban_db
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    with kanban_db.connect(board="comment-intent") as conn:
+        task_id = kanban_db.create_task(conn, title="blocked", assignee="agent", initial_status="blocked", board="comment-intent")
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    response = client.post(
+        f"/api/kanban/boards/comment-intent/tasks/{task_id}/comments",
+        headers=headers,
+        json={"author": "desktop", "body": "retomar", "intent": "resume"},
+    )
+
+    assert response.status_code == 201
+    with kanban_db.connect(board="comment-intent") as conn:
+        assert kanban_db.get_task(conn, task_id).status == "ready"
+        events = kanban_db.list_events(conn, task_id)
+    assert any(event.kind == "comment_intent" and event.payload["intent"] == "resume" for event in events)
+
+
+def test_desktop_kanban_comment_interrupt_intent_marks_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="comment-interrupt")
+
+    from hermes_cli import kanban_db
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    with kanban_db.connect(board="comment-interrupt") as conn:
+        task_id = kanban_db.create_task(conn, title="running", assignee="agent", board="comment-interrupt")
+        kanban_db.claim_task(conn, task_id, claimer="host:worker")
+        run_id = kanban_db.latest_run(conn, task_id).id
+
+    client = TestClient(app)
+    response = client.post(
+        f"/api/kanban/boards/comment-interrupt/tasks/{task_id}/comments",
+        headers={"X-Hermes-Session-Token": _SESSION_TOKEN},
+        json={"author": "desktop", "body": "interromper", "intent": "interrupt"},
+    )
+
+    assert response.status_code == 201
+    with kanban_db.connect(board="comment-interrupt") as conn:
+        task = kanban_db.get_task(conn, task_id)
+        events = kanban_db.list_events(conn, task_id)
+    assert task.status == "running"
+    interrupt = next(event for event in events if event.kind == "interrupt_requested")
+    assert interrupt.run_id == run_id
+
+
+
+
+def test_desktop_kanban_workflow_approval_request_and_decision(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="approvals")
+
+    from hermes_cli import kanban_db
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    route = {
+        "version": kanban_db.WORKFLOW_ROUTE_VERSION,
+        "template_id": "approval-test",
+        "steps": [{"id": "plan", "title": "Plan", "type": "planning", "assignee": "planner"}],
+    }
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    created = client.post(
+        "/api/kanban/boards/approvals/tasks",
+        headers=headers,
+        json={"title": "approval api", "workflowRoute": route},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+
+    requested = client.post(
+        f"/api/kanban/boards/approvals/tasks/{task_id}/workflow/steps/plan/approval",
+        headers=headers,
+        json={"reason": "operator must approve"},
+    )
+    assert requested.status_code == 200
+    step = requested.json()["task"]["workflowRoute"]["steps"][0]
+    assert step["approval"]["status"] == "pending"
+
+    blocked = client.patch(
+        f"/api/kanban/boards/approvals/tasks/{task_id}/workflow/steps/plan",
+        headers=headers,
+        json={"status": "passed"},
+    )
+    assert blocked.status_code == 400
+    assert "approval pending" in blocked.json()["detail"]
+
+    decided = client.patch(
+        f"/api/kanban/boards/approvals/tasks/{task_id}/workflow/steps/plan/approval",
+        headers=headers,
+        json={"decision": "approved", "reason": "ok"},
+    )
+    assert decided.status_code == 200
+    step = decided.json()["task"]["workflowRoute"]["steps"][0]
+    assert step["approval"]["status"] == "approved"
+
+
+
+def test_workspace_status_reports_close_readiness(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from hermes_cli import web_server
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    web_server._workspaces_conn = None
+    repo = tmp_path / "repo"
+    vault = tmp_path / "vault"
+    repo.mkdir()
+    vault.mkdir()
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+
+    created = client.post(
+        "/api/workspaces",
+        headers=headers,
+        json={"name": "Close Ready", "repo_path": str(repo), "vault_path": str(vault)},
+    )
+    assert created.status_code == 201
+    workspace_id = created.json()["workspace"]["id"]
+
+    status = client.get(f"/api/workspaces/{workspace_id}/status", headers=headers)
+    assert status.status_code == 200
+    readiness = status.json()["close_readiness"]
+    assert readiness["ready"] is True
+    assert readiness["blockers"] == []
+
+    conn = web_server._ensure_workspaces_db()
+    now = web_server._workspace_now()
+    conn.execute(
+        "INSERT INTO workspace_tasks (id, workspace_id, status, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("t_open", workspace_id, "running", "open task", now, now),
+    )
+    conn.commit()
+
+    blocked = client.get(f"/api/workspaces/{workspace_id}/status", headers=headers)
+    readiness = blocked.json()["close_readiness"]
+    assert readiness["ready"] is False
+    assert any(item["code"] == "open_tasks" and item["count"] == 1 for item in readiness["blockers"])
