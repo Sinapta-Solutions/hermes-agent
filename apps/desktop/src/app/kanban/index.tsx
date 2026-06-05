@@ -12,6 +12,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import {
   applyKanbanWorkflowPreset,
@@ -77,6 +78,16 @@ const KANBAN_COLUMN_SCROLL_MAX_HEIGHT = `calc(${KANBAN_VISIBLE_CARD_LIMIT} * 8.5
 const KANBAN_FAST_POLL_MS = 3000
 const KANBAN_IDLE_POLL_MS = 10000
 const JURISHUB_WORKFLOW_PRESET_ID = 'jurishub-standard'
+const UNASSIGNED_SELECT_VALUE = '__unassigned__'
+
+const KANBAN_SELECT_TRIGGER_CLASS =
+  'h-9 rounded-md border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-sm text-(--ui-text-primary)'
+
+const KANBAN_SELECT_CONTENT_CLASS =
+  'z-[160] border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) text-(--ui-text-primary)'
+
+const KANBAN_SELECT_ITEM_CLASS =
+  'text-(--ui-text-primary) focus:bg-(--ui-control-hover-background) focus:text-(--ui-text-primary) data-[state=checked]:bg-(--ui-control-hover-background)'
 
 interface TimelineItem {
   body?: string
@@ -484,17 +495,18 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <select
-            className="h-9 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) px-3 text-sm text-(--ui-text-primary) outline-none"
-            onChange={event => setSelectedBoardSlug(event.target.value)}
-            value={selectedBoard?.slug ?? ''}
-          >
-            {boards.map(board => (
-              <option key={board.slug} value={board.slug}>
-                {board.icon} {board.name}
-              </option>
-            ))}
-          </select>
+          <Select onValueChange={setSelectedBoardSlug} value={selectedBoard?.slug ?? ''}>
+            <SelectTrigger className={cn(KANBAN_SELECT_TRIGGER_CLASS, 'w-52 rounded-lg bg-(--ui-bg-elevated) px-3')}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className={KANBAN_SELECT_CONTENT_CLASS}>
+              {boards.map(board => (
+                <SelectItem className={KANBAN_SELECT_ITEM_CLASS} key={board.slug} value={board.slug}>
+                  {board.icon} {board.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button onClick={openCreateTask} type="button">
             <Codicon name="add" /> Novo card
           </Button>
@@ -699,31 +711,43 @@ function CreateTaskDialog({
           </Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Status">
-              <select
-                className="h-9 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2 text-sm"
-                onChange={event => setForm(prev => ({ ...prev, status: event.target.value as KanbanStatus }))}
+              <Select
+                onValueChange={value => setForm(prev => ({ ...prev, status: value as KanbanStatus }))}
                 value={form.status}
               >
-                {STATUSES.map(status => (
-                  <option key={status.value} value={status.value}>
-                    {status.label}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger className={KANBAN_SELECT_TRIGGER_CLASS}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className={KANBAN_SELECT_CONTENT_CLASS}>
+                  {STATUSES.map(status => (
+                    <SelectItem className={KANBAN_SELECT_ITEM_CLASS} key={status.value} value={status.value}>
+                      {status.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </Field>
             <Field label="Assignee">
-              <select
-                className="h-9 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2 text-sm"
-                onChange={event => setForm(prev => ({ ...prev, assignee: event.target.value }))}
-                value={form.assignee}
+              <Select
+                onValueChange={value =>
+                  setForm(prev => ({ ...prev, assignee: value === UNASSIGNED_SELECT_VALUE ? '' : value }))
+                }
+                value={form.assignee || UNASSIGNED_SELECT_VALUE}
               >
-                <option value="">Sem perfil</option>
-                {assignees.map(name => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger className={KANBAN_SELECT_TRIGGER_CLASS}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className={KANBAN_SELECT_CONTENT_CLASS}>
+                  <SelectItem className={KANBAN_SELECT_ITEM_CLASS} value={UNASSIGNED_SELECT_VALUE}>
+                    Sem perfil
+                  </SelectItem>
+                  {assignees.map(name => (
+                    <SelectItem className={KANBAN_SELECT_ITEM_CLASS} key={name} value={name}>
+                      {name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </Field>
           </div>
           <div className="grid grid-cols-[1fr_7rem] gap-3">
@@ -1019,10 +1043,7 @@ function TaskDetailDialog({
         {activeTask ? (
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 text-sm">
             <div className="grid gap-4">
-              <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
-                <div className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">
-                  Editar card
-                </div>
+              <AccordionBlock defaultOpen title="Editar card">
                 <div className="grid gap-3">
                   <Field label="Título">
                     <Input
@@ -1041,33 +1062,45 @@ function TaskDetailDialog({
                   </Field>
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                     <Field label="Status">
-                      <select
-                        className="h-9 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) px-2 text-sm"
-                        onChange={event =>
-                          setEditForm(prev => ({ ...prev, status: event.target.value as KanbanStatus }))
+                      <Select
+                        onValueChange={value =>
+                          setEditForm(prev => ({ ...prev, status: value as KanbanStatus }))
                         }
                         value={editForm.status}
                       >
-                        {STATUSES.map(status => (
-                          <option key={status.value} value={status.value}>
-                            {status.label}
-                          </option>
-                        ))}
-                      </select>
+                        <SelectTrigger className={KANBAN_SELECT_TRIGGER_CLASS}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className={KANBAN_SELECT_CONTENT_CLASS}>
+                          {STATUSES.map(status => (
+                            <SelectItem className={KANBAN_SELECT_ITEM_CLASS} key={status.value} value={status.value}>
+                              {status.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </Field>
                     <Field label="Assignee">
-                      <select
-                        className="h-9 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) px-2 text-sm"
-                        onChange={event => setEditForm(prev => ({ ...prev, assignee: event.target.value }))}
-                        value={editForm.assignee}
+                      <Select
+                        onValueChange={value =>
+                          setEditForm(prev => ({ ...prev, assignee: value === UNASSIGNED_SELECT_VALUE ? '' : value }))
+                        }
+                        value={editForm.assignee || UNASSIGNED_SELECT_VALUE}
                       >
-                        <option value="">Sem perfil</option>
-                        {assignees.map(name => (
-                          <option key={name} value={name}>
-                            {name}
-                          </option>
-                        ))}
-                      </select>
+                        <SelectTrigger className={KANBAN_SELECT_TRIGGER_CLASS}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className={KANBAN_SELECT_CONTENT_CLASS}>
+                          <SelectItem className={KANBAN_SELECT_ITEM_CLASS} value={UNASSIGNED_SELECT_VALUE}>
+                            Sem perfil
+                          </SelectItem>
+                          {assignees.map(name => (
+                            <SelectItem className={KANBAN_SELECT_ITEM_CLASS} key={name} value={name}>
+                              {name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </Field>
                     <Field label="Tenant">
                       <Input
@@ -1106,18 +1139,20 @@ function TaskDetailDialog({
                     </Button>
                   </div>
                 </div>
-              </section>
+              </AccordionBlock>
 
-              <div className="grid grid-cols-2 gap-2 text-xs text-(--ui-text-tertiary) md:grid-cols-4">
-                <Meta label="Criado" value={formatTime(activeTask.created_at)} />
-                <Meta label="Status" value={activeTask.status} />
-                <Meta label="Prioridade" value={String(activeTask.priority)} />
-                <Meta label="Falhas" value={String(activeTask.consecutive_failures)} />
-                <Meta label="Tenant" value={activeTask.tenant || '—'} />
-                <Meta label="Workdir" value={activeTask.workspace_path || '—'} />
-                <Meta label="Branch" value={activeTask.branch_name || '—'} />
-                <Meta label="Run" value={activeTask.current_run_id ? String(activeTask.current_run_id) : '—'} />
-              </div>
+              <AccordionBlock defaultOpen title="Metadados">
+                <div className="grid grid-cols-2 gap-2 text-xs text-(--ui-text-tertiary) md:grid-cols-4">
+                  <Meta label="Criado" value={formatTime(activeTask.created_at)} />
+                  <Meta label="Status" value={activeTask.status} />
+                  <Meta label="Prioridade" value={String(activeTask.priority)} />
+                  <Meta label="Falhas" value={String(activeTask.consecutive_failures)} />
+                  <Meta label="Tenant" value={activeTask.tenant || '—'} />
+                  <Meta label="Workdir" value={activeTask.workspace_path || '—'} />
+                  <Meta label="Branch" value={activeTask.branch_name || '—'} />
+                  <Meta label="Run" value={activeTask.current_run_id ? String(activeTask.current_run_id) : '—'} />
+                </div>
+              </AccordionBlock>
 
               <WorkflowRoutePanel
                 applyingPreset={applyingWorkflowPreset}
@@ -1139,12 +1174,11 @@ function TaskDetailDialog({
               </AccordionBlock>
 
               {activeTask.result && (
-                <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">
-                    Resultado
-                  </div>
-                  <pre className="whitespace-pre-wrap break-words text-(--ui-text-secondary)">{activeTask.result}</pre>
-                </section>
+                <AccordionBlock title="Resultado">
+                  <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-(--ui-text-secondary)">
+                    {activeTask.result}
+                  </pre>
+                </AccordionBlock>
               )}
 
               <AccordionBlock defaultOpen={failures.length > 0} title={`Falhas detectadas (${failures.length})`}>
@@ -1276,26 +1310,24 @@ function WorkflowRoutePanel({
 
   if (!route) {
     return (
-      <section className="rounded-xl border border-dashed border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
+      <AccordionBlock title="WorkflowRoute">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">WorkflowRoute</div>
-            <div className="mt-1 text-xs text-(--ui-text-tertiary)">Card legado: sem rota multi-agente.</div>
+            <div className="text-xs text-(--ui-text-tertiary)">Card legado: sem rota multi-agente.</div>
           </div>
           <Button disabled={applyingPreset} onClick={onApplyPreset} size="sm" type="button">
             {applyingPreset ? 'Aplicando…' : 'Aplicar preset JurisHUB'}
           </Button>
         </div>
-      </section>
+      </AccordionBlock>
     )
   }
 
   return (
-    <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
+    <AccordionBlock defaultOpen title={`WorkflowRoute (${progress.passed}/${progress.total})`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">WorkflowRoute</div>
-          <div className="mt-1 text-xs text-(--ui-text-tertiary)">
+          <div className="text-xs text-(--ui-text-tertiary)">
             {route.template_id || 'custom'} · etapa atual {currentStep?.id ?? '—'} · {progress.passed}/{progress.total} concluídas
           </div>
         </div>
@@ -1373,7 +1405,7 @@ function WorkflowRoutePanel({
           </Button>
         </div>
       </div>
-    </section>
+    </AccordionBlock>
   )
 }
 
