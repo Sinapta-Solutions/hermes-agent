@@ -718,6 +718,32 @@ def test_workflow_approval_request_records_worker_gate(monkeypatch, worker_env):
         conn.close()
 
 
+def test_complete_reports_pending_workflow_approval(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        kb.set_workflow_route(
+            conn,
+            worker_env,
+            {
+                "steps": [
+                    {"id": "planning", "title": "Planning", "assignee": "test-worker"},
+                ],
+            },
+        )
+        kb.request_workflow_approval(conn, worker_env, "planning", reason="needs human signoff", actor="worker")
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_WORKFLOW_STEP", "planning")
+    out = kt._handle_complete({"summary": "done anyway"})
+    error = json.loads(out).get("error", "")
+    assert "approval pending" in error
+    assert "human approval" in error
+
+
 def test_workflow_evidence_rejects_stale_worker_step(monkeypatch, worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
@@ -1919,7 +1945,7 @@ def test_board_param_rejects_invalid_slug(multi_board_env):
 
 
 def test_board_param_in_all_schemas():
-    """All nine kanban_* tool schemas must expose an optional ``board``
+    """All kanban_* tool schemas must expose an optional ``board``
     parameter. This pins the contract surfaced to the LLM — adding a
     new kanban tool without ``board`` will fail CI immediately."""
     from tools import kanban_tools as kt
@@ -1932,6 +1958,8 @@ def test_board_param_in_all_schemas():
         kt.KANBAN_HEARTBEAT_SCHEMA,
         kt.KANBAN_COMMENT_SCHEMA,
         kt.KANBAN_CREATE_SCHEMA,
+        kt.KANBAN_WORKFLOW_EVIDENCE_SCHEMA,
+        kt.KANBAN_WORKFLOW_APPROVAL_SCHEMA,
         kt.KANBAN_UNBLOCK_SCHEMA,
         kt.KANBAN_LINK_SCHEMA,
     ]

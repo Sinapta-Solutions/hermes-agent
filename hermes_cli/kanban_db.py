@@ -2798,8 +2798,9 @@ def update_workflow_step(
             status = status.strip().lower()
             if status not in VALID_WORKFLOW_STEP_STATUSES:
                 raise ValueError(f"status must be one of {sorted(VALID_WORKFLOW_STEP_STATUSES)}")
-            if status in {"passed", "skipped"} and _workflow_step_has_pending_approval(step):
-                raise ValueError(f"workflow step {step_id} approval pending")
+            if status in {"passed", "skipped"} and _workflow_step_has_blocking_approval(step):
+                approval_status = _workflow_step_approval_status(step)
+                raise ValueError(f"workflow step {step_id} approval {approval_status}")
             step["status"] = status
             step.setdefault("timestamps", {})[f"{status}_at"] = int(time.time())
         if evidence:
@@ -2836,9 +2837,20 @@ def update_workflow_step(
     return route
 
 
-def _workflow_step_has_pending_approval(step: Optional[dict]) -> bool:
+def _workflow_step_approval_status(step: Optional[dict]) -> Optional[str]:
     approval = step.get("approval") if isinstance(step, dict) else None
-    return isinstance(approval, dict) and approval.get("status") == "pending"
+    if not isinstance(approval, dict):
+        return None
+    status = str(approval.get("status") or "").strip().lower()
+    return status or None
+
+
+def _workflow_step_has_pending_approval(step: Optional[dict]) -> bool:
+    return _workflow_step_approval_status(step) == "pending"
+
+
+def _workflow_step_has_blocking_approval(step: Optional[dict]) -> bool:
+    return _workflow_step_approval_status(step) in {"pending", "rejected"}
 
 
 def request_workflow_approval(
@@ -2855,7 +2867,10 @@ def request_workflow_approval(
         raise ValueError("approval reason is required")
     now = int(time.time())
     with write_txn(conn):
-        row = conn.execute("SELECT workflow_route FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute(
+            "SELECT workflow_route, current_step_key, status FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
         if row is None:
             raise ValueError(f"unknown task {task_id}")
         route = normalize_workflow_route(row["workflow_route"])
@@ -2873,8 +2888,13 @@ def request_workflow_approval(
         }
         if run_id is not None:
             approval["run_id"] = int(run_id)
+        task_status: Optional[str] = None
+        if row["status"] == "ready" and (row["current_step_key"] == step_id or route.get("current_step_id") == step_id):
+            approval["blocked_task_status"] = "ready"
+            step["status"] = "blocked"
+            task_status = "blocked"
         step["approval"] = approval
-        _workflow_update_task_route_locked(conn, task_id, route)
+        _workflow_update_task_route_locked(conn, task_id, route, status=task_status)
         _append_event(
             conn,
             task_id,
@@ -2909,7 +2929,9 @@ def resolve_workflow_approval(
         step = _workflow_step(route, step_id)
         if not step:
             raise ValueError(f"workflow step not found: {step_id}")
-        approval = step.get("approval") if isinstance(step.get("approval"), dict) else {}
+        approval = step.get("approval") if isinstance(step.get("approval"), dict) else None
+        if not approval or str(approval.get("status") or "").strip().lower() != "pending":
+            raise ValueError(f"workflow step {step_id} has no pending approval")
         approval.update(
             {
                 "status": clean_decision,
@@ -2920,9 +2942,13 @@ def resolve_workflow_approval(
         if clean_reason:
             approval["decision_reason"] = clean_reason
         step["approval"] = approval
-        task_status = "blocked" if clean_decision == "rejected" else row["status"]
+        task_status = row["status"]
         if clean_decision == "rejected":
             step["status"] = "blocked"
+            task_status = "blocked"
+        elif step.get("status") == "blocked" and approval.get("blocked_task_status") == "ready" and row["status"] == "blocked":
+            step["status"] = "ready"
+            task_status = "ready"
         _workflow_update_task_route_locked(conn, task_id, route, status=task_status)
         _append_event(
             conn,
@@ -3944,6 +3970,23 @@ def claim_task(
                 {"reason": "unresolved_blockers", "blockers": [item["id"] for item in blockers]},
             )
             return None
+        workflow_row = conn.execute(
+            "SELECT workflow_route, current_step_key FROM tasks WHERE id = ? AND status = 'ready'",
+            (task_id,),
+        ).fetchone()
+        if workflow_row and workflow_row["workflow_route"] and workflow_row["current_step_key"]:
+            route = normalize_workflow_route(workflow_row["workflow_route"])
+            step = _workflow_step(route, workflow_row["current_step_key"]) if route else None
+            if _workflow_step_has_blocking_approval(step):
+                approval_status = _workflow_step_approval_status(step)
+                conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ? AND status = 'ready'", (task_id,))
+                _append_event(
+                    conn,
+                    task_id,
+                    "claim_rejected",
+                    {"reason": f"workflow_approval_{approval_status}", "step_id": workflow_row["current_step_key"]},
+                )
+                return None
         # Defensive: if a prior run somehow leaked (invariant violation from
         # an unknown code path), close it as 'reclaimed' so we don't strand
         # it when the CAS resets the pointer below. No-op when the invariant
@@ -4683,12 +4726,13 @@ def complete_task(
             route = normalize_workflow_route(wf_row["workflow_route"])
             if route:
                 current_step = _workflow_step(route, wf_row["current_step_key"])
-                if _workflow_step_has_pending_approval(current_step):
+                if _workflow_step_has_blocking_approval(current_step):
+                    approval_status = _workflow_step_approval_status(current_step)
                     _append_event(
                         conn,
                         task_id,
                         "workflow.approval.blocked_completion",
-                        {"step_id": wf_row["current_step_key"]},
+                        {"step_id": wf_row["current_step_key"], "approval_status": approval_status},
                         run_id=wf_row["current_run_id"],
                     )
                     return False

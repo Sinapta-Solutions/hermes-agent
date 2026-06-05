@@ -1,4 +1,3 @@
-
 export interface Workspace {
   board_id?: null | string
   branch?: null | string
@@ -94,7 +93,9 @@ export interface KanbanBoardsResponse {
 
 export interface KanbanWorkflowEvidence {
   actor?: null | string
+  created_at?: null | number
   kind?: null | string
+  metadata?: null | Record<string, unknown>
   run_id?: null | number
   text?: null | string
   timestamp?: null | number
@@ -103,6 +104,7 @@ export interface KanbanWorkflowEvidence {
 export type KanbanWorkflowStepStatus = 'pending' | 'ready' | 'running' | 'passed' | 'blocked' | 'failed' | 'skipped'
 
 export interface KanbanWorkflowApproval {
+  blocked_task_status?: null | string
   decided_at?: null | number
   decided_by?: null | string
   decision_reason?: null | string
@@ -122,7 +124,10 @@ export interface KanbanWorkflowStep {
   id: string
   max_retries?: null | number
   retry_count?: number
+  run_id?: null | number
+  session_id?: null | string
   status: KanbanWorkflowStepStatus
+  timestamps?: Record<string, null | number>
   title?: null | string
   type?: null | string
   validation_criteria?: string[]
@@ -362,6 +367,7 @@ export interface KanbanDispatcherStatusResponse {
   last_event_at?: null | number
   object: 'hermes.kanban.dispatcher_status'
   pending_approvals_count: number
+  invalid_workflow_route_count?: number
   ready_count: number
   running_count: number
   stale_running_count: number

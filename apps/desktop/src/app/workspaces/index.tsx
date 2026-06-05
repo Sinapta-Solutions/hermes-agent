@@ -314,8 +314,14 @@ export function WorkspacesView({ onNewSessionInWorkspace, setStatusbarItemGroup 
                   </div>
                   <Button
                     className="w-full"
-                    disabled={!selected.repo_path}
-                    onClick={() => onNewSessionInWorkspace?.(selected.repo_path ?? null)}
+                    disabled={!selected.repo_path || activeStatus?.repo_exists === false}
+                    onClick={() => {
+                      if (activeStatus?.repo_exists === false) {
+                        return
+                      }
+
+                      onNewSessionInWorkspace?.(selected.repo_path ?? null)
+                    }}
                     type="button"
                     variant="secondary"
                   >

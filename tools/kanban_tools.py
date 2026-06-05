@@ -542,6 +542,24 @@ def _handle_list(args: dict, **kw) -> str:
         return tool_error(f"kanban_list: {e}")
 
 
+def _workflow_approval_block_message(task) -> Optional[str]:
+    route = task.workflow_route if task else None
+    step_id = task.current_step_key if task else None
+    if not isinstance(route, dict) or not step_id:
+        return None
+    step = next((item for item in route.get("steps", []) if isinstance(item, dict) and item.get("id") == step_id), None)
+    approval = step.get("approval") if isinstance(step, dict) else None
+    if not isinstance(approval, dict):
+        return None
+    status = str(approval.get("status") or "").strip().lower()
+    if status not in {"pending", "rejected"}:
+        return None
+    return (
+        f"kanban_complete blocked: workflow step {step_id} approval {status}. "
+        "Wait for human approval before completing this task; keep working notes in kanban_workflow_evidence or kanban_comment."
+    )
+
+
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
     tid = _default_task_id(args.get("task_id"))
@@ -650,6 +668,10 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
             if not ok:
+                task = kb.get_task(conn, tid)
+                approval_block = _workflow_approval_block_message(task)
+                if approval_block:
+                    return tool_error(approval_block)
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )

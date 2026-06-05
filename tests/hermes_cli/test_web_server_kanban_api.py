@@ -368,6 +368,53 @@ def test_desktop_kanban_dispatcher_status_endpoint_reports_counts(tmp_path, monk
     assert body["pending_approvals_count"] == 1
     assert isinstance(body["active_runs"], list)
 
+
+def test_desktop_kanban_status_update_cannot_bypass_pending_approval(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="gate")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    created = client.post(
+        "/api/kanban/boards/gate/tasks",
+        headers=headers,
+        json={"title": "approval task", "workflowRoute": {"steps": [{"id": "plan", "title": "Plan"}]}},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+    requested = client.post(
+        f"/api/kanban/boards/gate/tasks/{task_id}/workflow/steps/plan/approval",
+        headers=headers,
+        json={"reason": "ops gate"},
+    )
+    assert requested.status_code == 200
+
+    bypass = client.patch(f"/api/kanban/boards/gate/tasks/{task_id}", headers=headers, json={"status": "done"})
+    assert bypass.status_code == 409
+    assert "approval pending" in bypass.json()["detail"]
+
+
+def test_desktop_kanban_dispatcher_status_ignores_invalid_workflow_route(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    db_path = _seed_board(tmp_path, slug="invalid-route")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        kanban_db.create_task(conn, title="broken workflow", workflow_route={"steps": [{"id": "plan"}]})
+        conn.execute("UPDATE tasks SET workflow_route = ? WHERE title = ?", ("{not-json", "broken workflow"))
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+
+    status = client.get("/api/kanban/boards/invalid-route/dispatcher/status", headers=headers)
+    assert status.status_code == 200
+    assert status.json()["invalid_workflow_route_count"] == 1
+
+
 def test_desktop_kanban_task_runs_endpoint_returns_ordered_run_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     db_path = _seed_board(tmp_path, slug="runs")

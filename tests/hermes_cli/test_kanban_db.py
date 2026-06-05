@@ -4676,6 +4676,66 @@ def test_workflow_approval_pending_blocks_step_completion_until_approved(kanban_
     assert any(event.kind == "workflow.approval.approved" for event in events)
 
 
+def test_workflow_approval_pending_blocks_ready_claim_until_approved(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="pre-dispatch gate", assignee="fallback", workflow_route=_workflow_route())
+
+        approval = kb.request_workflow_approval(
+            conn,
+            tid,
+            "planning",
+            reason="human must approve before dispatch",
+            actor="desktop",
+        )
+        assert approval["status"] == "pending"
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.workflow_route["steps"][0]["status"] == "blocked"
+        assert kb.claim_task(conn, tid, claimer="blocked-worker") is None
+
+        decided = kb.resolve_workflow_approval(conn, tid, "planning", decision="approved", actor="desktop")
+        assert decided["status"] == "approved"
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.workflow_route["steps"][0]["status"] == "ready"
+        assert kb.claim_task(conn, tid, claimer="approved-worker") is not None
+
+
+def test_workflow_approval_rejected_blocks_completion_and_step_pass(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="rejected gate", assignee="fallback", workflow_route=_workflow_route())
+        assert kb.claim_task(conn, tid, claimer="approval-worker") is not None
+        kb.request_workflow_approval(conn, tid, "planning", reason="needs review", actor="worker")
+
+        decided = kb.resolve_workflow_approval(
+            conn,
+            tid,
+            "planning",
+            decision="rejected",
+            actor="desktop",
+            reason="not safe",
+        )
+        assert decided["status"] == "rejected"
+
+        assert kb.complete_task(conn, tid, summary="ignore rejection") is False
+        with pytest.raises(ValueError, match="approval rejected"):
+            kb.update_workflow_step(conn, tid, "planning", status="passed", actor="desktop")
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.workflow_route["steps"][0]["status"] == "blocked"
+
+
+def test_resolve_workflow_approval_requires_pending_gate(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="no approval", assignee="fallback", workflow_route=_workflow_route())
+
+        with pytest.raises(ValueError, match="no pending approval"):
+            kb.resolve_workflow_approval(conn, tid, "planning", decision="approved", actor="desktop")
+
+
 def test_jurishub_workflow_preset_sets_expected_steps(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="jurishub flow", assignee="juris-agent")

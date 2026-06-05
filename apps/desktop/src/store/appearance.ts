@@ -10,6 +10,7 @@ export type ResolvedMotionMode = 'full' | 'reduced' | 'off'
 export type BackgroundEffect = 'none' | 'dots' | 'rain' | 'constellations' | 'petals' | 'sparkles' | 'embers'
 
 const MOTION_MODES = new Set<MotionMode>(['system', 'full', 'reduced', 'off'])
+
 const BACKGROUND_EFFECTS = new Set<BackgroundEffect>([
   'none',
   'dots',

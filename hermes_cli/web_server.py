@@ -2692,6 +2692,28 @@ async def update_kanban_task(slug: str, task_id: str, request: Request):
             status = str(body.get("status") or "").strip().lower()
             if status not in _KANBAN_STATUSES:
                 raise HTTPException(status_code=400, detail="Invalid task status")
+            if status in {"done", "running"} and task["workflow_route"] and task["current_step_key"]:
+                from hermes_cli import kanban_db
+
+                try:
+                    route = kanban_db.normalize_workflow_route(task["workflow_route"])
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=f"Invalid workflowRoute: {exc}") from None
+                step = next(
+                    (
+                        item
+                        for item in (route or {}).get("steps", [])
+                        if isinstance(item, dict) and item.get("id") == task["current_step_key"]
+                    ),
+                    None,
+                )
+                approval = step.get("approval") if isinstance(step, dict) else None
+                approval_status = str(approval.get("status") or "").strip().lower() if isinstance(approval, dict) else ""
+                if approval_status in {"pending", "rejected"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"workflow step {task['current_step_key']} approval {approval_status}",
+                    )
             if status == "archived":
                 from hermes_cli import kanban_db
 
@@ -2995,8 +3017,13 @@ def get_kanban_dispatcher_status(slug: str):
         ).fetchone()[0]
         last_event_at = conn.execute("SELECT MAX(created_at) FROM task_events").fetchone()[0]
         pending_approvals_count = 0
+        invalid_workflow_route_count = 0
         for route_row in conn.execute("SELECT workflow_route FROM tasks WHERE workflow_route IS NOT NULL AND status != 'archived'").fetchall():
-            route = kanban_db.normalize_workflow_route(route_row["workflow_route"])
+            try:
+                route = kanban_db.normalize_workflow_route(route_row["workflow_route"])
+            except ValueError:
+                invalid_workflow_route_count += 1
+                continue
             if not route:
                 continue
             pending_approvals_count += sum(
@@ -3027,6 +3054,7 @@ def get_kanban_dispatcher_status(slug: str):
             "running_count": running_count,
             "stale_running_count": stale_running_count,
             "pending_approvals_count": pending_approvals_count,
+            "invalid_workflow_route_count": invalid_workflow_route_count,
             "last_event_at": last_event_at,
             "active_runs": active_runs,
         }

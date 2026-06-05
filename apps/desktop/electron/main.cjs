@@ -4197,7 +4197,9 @@ ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
   if (dying) {
     await new Promise(resolve => {
       const timer = setTimeout(() => {
-        try { dying.kill('SIGKILL') } catch {}
+        try { dying.kill('SIGKILL') } catch {
+          // Ignore if the process already exited between the timer firing and kill().
+        }
         resolve()
       }, 5000)
       dying.once('exit', () => {

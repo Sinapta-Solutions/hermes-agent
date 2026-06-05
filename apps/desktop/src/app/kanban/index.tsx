@@ -167,7 +167,11 @@ function isKanbanShortcutTarget(target: EventTarget | null) {
     return false
   }
 
-  return Boolean(target.closest('input, textarea, select, button, [contenteditable="true"], [role="textbox"]'))
+  return Boolean(
+    target.closest(
+      'input, textarea, select, button, [contenteditable="true"], [role="textbox"], [role="combobox"], [role="listbox"], [role="option"], [role="menu"], [role="menuitem"]'
+    )
+  )
 }
 
 interface TimelineItem {
@@ -354,6 +358,19 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
 
   const boardTenant = selectedBoard?.slug ? selectedBoard.slug.toLowerCase() : ''
   const boardDensity = useMemo(() => getKanbanBoardDensity(tasks), [tasks])
+
+  const keyboardTasks = useMemo(
+    () =>
+      STATUSES.flatMap(column =>
+        buildKanbanColumnView({
+          expandedStatuses: expandedColdStatuses,
+          status: column.value,
+          tasks,
+          visibleLimit: columnVisibleLimits[column.value] ?? boardDensity.defaultPageSize
+        }).visibleTasks
+      ),
+    [boardDensity.defaultPageSize, columnVisibleLimits, expandedColdStatuses, tasks]
+  )
 
   useEffect(() => {
     if (!selectedBoard?.slug) {
@@ -606,7 +623,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
           currentTaskId: selectedTaskId,
           direction: event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 'next' : 'previous',
           statusOrder: KANBAN_STATUS_ORDER,
-          tasks
+          tasks: keyboardTasks
         })
 
         if (nextId) {
@@ -650,7 +667,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
     refreshTasks,
     selectedBoard?.slug,
     selectedTaskId,
-    tasks
+    keyboardTasks
   ])
 
   const submit = async () => {
@@ -949,6 +966,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
           }
         }}
         onRefreshDetail={loadTaskDetail}
+        onRefreshDispatcherStatus={() => (selectedBoard?.slug ? refreshDispatcherStatus(selectedBoard.slug) : Promise.resolve(null))}
         onTaskArchived={archivedTaskId => {
           setTasks(current => current.filter(item => item.id !== archivedTaskId))
           setDetail(current => (current?.task.id === archivedTaskId ? null : current))
@@ -1006,6 +1024,11 @@ function DispatcherStatusPanel({
           <span className={cn('rounded bg-(--ui-bg-secondary) px-2 py-1', status.pending_approvals_count > 0 ? 'text-(--ui-orange)' : 'text-(--ui-text-tertiary)')}>
             approvals {status.pending_approvals_count}
           </span>
+          {status.invalid_workflow_route_count ? (
+            <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-red)">
+              rotas inválidas {status.invalid_workflow_route_count}
+            </span>
+          ) : null}
           <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-quaternary)">
             ↑↓ seleciona · Enter abre · N novo · R refresh
           </span>
@@ -1174,6 +1197,7 @@ function TaskDetailDialog({
   onTaskArchived,
   onOpenChange,
   onRefreshDetail,
+  onRefreshDispatcherStatus,
   onTaskUpdated,
   open,
   task
@@ -1184,6 +1208,7 @@ function TaskDetailDialog({
   onTaskArchived: (taskId: string) => void
   onOpenChange: (open: boolean) => void
   onRefreshDetail: (taskId: string) => Promise<KanbanTaskDetailResponse | null>
+  onRefreshDispatcherStatus: () => Promise<KanbanDispatcherStatusResponse | null>
   onTaskUpdated: (task: KanbanTask) => void
   open: boolean
   task: KanbanTask | null
@@ -1260,6 +1285,10 @@ function TaskDetailDialog({
       return
     }
 
+    const manualWorkdir = editForm.workspace_path.trim()
+    const currentWorkspaceKind = kanbanWorkspaceKind(activeTask.workspace_kind)
+    const workspaceKind = manualWorkdir ? 'dir' : currentWorkspaceKind === 'dir' ? 'scratch' : currentWorkspaceKind
+
     const payload: KanbanTaskUpdatePayload = {
       assignee: editForm.assignee.trim() || null,
       body: editForm.body.trim() || null,
@@ -1267,8 +1296,8 @@ function TaskDetailDialog({
       status: editForm.status,
       tenant: editForm.tenant.trim() || null,
       title: editForm.title.trim(),
-      workspace_kind: kanbanWorkspaceKind(activeTask.workspace_kind),
-      workspace_path: editForm.workspace_path.trim() || null
+      workspace_kind: workspaceKind,
+      workspace_path: manualWorkdir || null
     }
 
     setSavingTask(true)
@@ -1496,6 +1525,7 @@ function TaskDetailDialog({
 
       onTaskUpdated(updated)
       await onRefreshDetail(updated.id)
+      await onRefreshDispatcherStatus()
       notify({ title: 'Kanban', message: `Approval solicitado em ${stepId}` })
     } catch (error) {
       notifyError(error, 'Failed to request Kanban workflow approval')
@@ -1515,6 +1545,7 @@ function TaskDetailDialog({
       const updated = await resolveKanbanWorkflowApproval(boardSlug, activeTask.id, stepId, { decision })
       onTaskUpdated(updated)
       await onRefreshDetail(updated.id)
+      await onRefreshDispatcherStatus()
       notify({ title: 'Kanban', message: `Approval ${decision === 'approved' ? 'aprovado' : 'rejeitado'} em ${stepId}` })
     } catch (error) {
       notifyError(error, 'Failed to resolve Kanban workflow approval')
