@@ -331,6 +331,57 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
+def test_complete_reports_unresolved_parent_block(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="open parent")
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+            (parent, worker_env),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = kt._handle_complete({"summary": "premature"})
+    error = json.loads(out).get("error", "")
+    assert "unresolved parent dependencies" in error
+    assert parent in error
+
+
+def test_complete_worktree_without_review_evidence_moves_card_to_review(worker_env, tmp_path):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET workspace_kind = 'worktree', workspace_path = ?, branch_name = ? WHERE id = ?",
+            (str(tmp_path / "worktree"), "hermes/kanban/test", worker_env),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = kt._handle_complete({
+        "summary": "implemented in isolated worktree",
+        "metadata": {"changed_files": ["src/App.tsx"]},
+    })
+    assert json.loads(out)["ok"] is True
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        run = kb.latest_run(conn, worker_env)
+        assert task.status == "review"
+        assert run.outcome == "review_required"
+    finally:
+        conn.close()
+
+
 def test_complete_metadata_round_trips_through_show(worker_env):
     """Structured completion metadata should be visible to downstream agents."""
     from tools import kanban_tools as kt

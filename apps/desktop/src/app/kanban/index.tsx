@@ -122,6 +122,7 @@ const KANBAN_STATUS_ORDER = STATUSES.map(status => status.value)
 const KANBAN_FAST_POLL_MS = 3000
 const KANBAN_IDLE_POLL_MS = 10000
 const KANBAN_BOARD_PREFS_STORAGE_KEY = 'mia-kanban-board-preferences'
+const KANBAN_COLUMN_VISIBLE_CARD_LIMIT = 5
 const JURISHUB_WORKFLOW_PRESET_ID = 'jurishub-standard'
 const UNASSIGNED_SELECT_VALUE = '__unassigned__'
 
@@ -366,10 +367,10 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
           expandedStatuses: expandedColdStatuses,
           status: column.value,
           tasks,
-          visibleLimit: columnVisibleLimits[column.value] ?? boardDensity.defaultPageSize
+          visibleLimit: tasks.length
         }).visibleTasks
       ),
-    [boardDensity.defaultPageSize, columnVisibleLimits, expandedColdStatuses, tasks]
+    [expandedColdStatuses, tasks]
   )
 
   useEffect(() => {
@@ -403,18 +404,6 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
       current.includes(status) ? current.filter(item => item !== status) : [...current, status]
     )
   }, [])
-
-  const showMoreInColumn = useCallback(
-    (status: KanbanStatus, total: number) => {
-      setColumnVisibleLimits(current => {
-        const currentLimit = current[status] ?? boardDensity.defaultPageSize
-        const nextLimit = currentLimit < 25 ? 25 : currentLimit < 50 ? 50 : total
-
-        return { ...current, [status]: Math.min(nextLimit, total) }
-      })
-    },
-    [boardDensity.defaultPageSize]
-  )
 
   const updateRouteQuery = useCallback(
     (next: { board?: null | string; task?: null | string }, replace = true) => {
@@ -832,7 +821,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                   expandedStatuses: expandedColdStatuses,
                   status: column.value,
                   tasks,
-                  visibleLimit: columnVisibleLimits[column.value] ?? boardDensity.defaultPageSize
+                  visibleLimit: tasks.length
                 })
 
                 const isColdColumn = boardDensity.coldLaneStatuses.includes(column.value)
@@ -893,12 +882,17 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                       </div>
                     ) : (
                       <>
-                        {columnView.truncated && (
+                        {columnView.total > KANBAN_COLUMN_VISIBLE_CARD_LIMIT && (
                           <div className="mb-2 text-[0.68rem] text-(--ui-text-quaternary)">
-                            Mostrando {columnView.visibleTasks.length} de {columnView.total}; há {columnView.hiddenCount} ocultos.
+                            Mostrando {KANBAN_COLUMN_VISIBLE_CARD_LIMIT} por vez; role a coluna para ver os {columnView.total} cards.
                           </div>
                         )}
-                        <div className="flex flex-col gap-2 pr-1">
+                        <div
+                          className={cn(
+                            'flex flex-col gap-2 overflow-y-auto overscroll-contain pr-1',
+                            columnView.compactCards ? 'max-h-[calc(5*6rem+4*0.5rem)]' : 'max-h-[calc(5*8rem+4*0.5rem)]'
+                          )}
+                        >
                           {columnView.visibleTasks.map(task => (
                             <TaskCard
                               active={selectedTask?.id === task.id}
@@ -924,16 +918,6 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                             </div>
                           )}
                         </div>
-                        {columnView.truncated && (
-                          <Button
-                            className="mt-2 h-8 w-full text-xs"
-                            onClick={() => showMoreInColumn(column.value, columnView.total)}
-                            type="button"
-                            variant="secondary"
-                          >
-                            Mostrar mais
-                          </Button>
-                        )}
                       </>
                     )}
                   </section>
@@ -2198,7 +2182,7 @@ function TaskCard({
     <div
       className={cn(
         'rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-left shadow-sm transition hover:border-(--ui-accent) hover:bg-(--ui-control-hover-background)',
-        compact ? 'p-2' : 'p-3',
+        compact ? 'h-24 overflow-hidden p-2' : 'h-32 overflow-hidden p-3',
         active && 'border-(--ui-accent) ring-1 ring-(--ui-accent)',
         dragging && 'opacity-55 ring-1 ring-(--ui-accent)'
       )}

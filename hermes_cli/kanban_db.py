@@ -3279,13 +3279,39 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
             "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
             (parent_id, child_id),
         )
-        # If child was ready but parent is not yet done, demote child to todo.
         parent_status = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (parent_id,)
         ).fetchone()["status"]
-        if parent_status != "done":
+        if parent_status not in {"done", "archived"}:
+            running_child = conn.execute(
+                "SELECT current_run_id FROM tasks WHERE id = ? AND status = 'running'",
+                (child_id,),
+            ).fetchone()
+            if running_child and running_child["current_run_id"]:
+                _end_run(
+                    conn,
+                    child_id,
+                    outcome="reclaimed",
+                    status="reclaimed",
+                    summary=f"dependency {parent_id} added while task was running",
+                )
+                _append_event(
+                    conn,
+                    child_id,
+                    "dependency_added_while_running",
+                    {"parent": parent_id, "child": child_id},
+                    run_id=int(running_child["current_run_id"]),
+                )
             conn.execute(
-                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                """
+                UPDATE tasks
+                   SET status = 'todo',
+                       claim_lock = NULL,
+                       claim_expires = NULL,
+                       worker_pid = NULL
+                 WHERE id = ?
+                   AND status IN ('ready', 'running')
+                """,
                 (child_id,),
             )
         _append_event(
@@ -4645,6 +4671,72 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+def _completion_has_worktree_review_evidence(metadata: Optional[dict]) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    truthy_keys = {
+        "applied_to_target",
+        "merged_to_base",
+        "reviewed",
+        "review_approved",
+    }
+    if any(bool(metadata.get(key)) for key in truthy_keys):
+        return True
+    review_status = str(metadata.get("review_status") or "").strip().lower()
+    if review_status in {"approved", "applied", "merged"}:
+        return True
+    return any(str(metadata.get(key) or "").strip() for key in ("pr_url", "merge_commit", "applied_commit"))
+
+
+def _send_worktree_task_to_review_locked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    summary: Optional[str],
+    result: Optional[str],
+    metadata: Optional[dict],
+) -> bool:
+    run_id = _end_run(
+        conn,
+        task_id,
+        outcome="review_required",
+        status="review_required",
+        summary=summary if summary is not None else result,
+        metadata=metadata,
+    )
+    if run_id is None and (summary or metadata or result):
+        run_id = _synthesize_ended_run(
+            conn,
+            task_id,
+            outcome="review_required",
+            summary=summary if summary is not None else result,
+            metadata=metadata,
+        )
+    cur = conn.execute(
+        """
+        UPDATE tasks
+           SET status = 'review',
+               claim_lock = NULL,
+               claim_expires = NULL,
+               worker_pid = NULL,
+               current_run_id = NULL
+         WHERE id = ?
+           AND status IN ('running', 'ready', 'blocked')
+        """,
+        (task_id,),
+    )
+    if cur.rowcount != 1:
+        return False
+    _append_event(
+        conn,
+        task_id,
+        "worktree.review_required",
+        {"reason": "missing_applied_or_review_evidence"},
+        run_id=run_id,
+    )
+    return True
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4717,12 +4809,34 @@ def complete_task(
     run_id: Optional[int] = None
     with write_txn(conn):
         wf_row = conn.execute(
-            "SELECT workflow_route, current_step_key, current_run_id, status FROM tasks WHERE id = ?",
+            "SELECT workflow_route, current_step_key, current_run_id, status, workspace_kind FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
+        blockers = unresolved_blockers_for_task(conn, task_id)
+        if blockers:
+            _append_event(
+                conn,
+                task_id,
+                "completion_blocked_unresolved_parents",
+                {"blockers": [item["id"] for item in blockers]},
+                run_id=wf_row["current_run_id"] if wf_row else None,
+            )
+            return False
+        if expected_run_id is not None and int((wf_row["current_run_id"] if wf_row else 0) or 0) != int(expected_run_id):
+            return False
+        if (
+            wf_row
+            and wf_row["workspace_kind"] == "worktree"
+            and not _completion_has_worktree_review_evidence(metadata)
+        ):
+            return _send_worktree_task_to_review_locked(
+                conn,
+                task_id,
+                summary=summary,
+                result=result,
+                metadata=metadata,
+            )
         if wf_row and wf_row["workflow_route"] and wf_row["current_step_key"]:
-            if expected_run_id is not None and int(wf_row["current_run_id"] or 0) != int(expected_run_id):
-                return False
             route = normalize_workflow_route(wf_row["workflow_route"])
             if route:
                 current_step = _workflow_step(route, wf_row["current_step_key"])

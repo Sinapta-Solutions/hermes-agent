@@ -669,6 +669,13 @@ def _handle_complete(args: dict, **kw) -> str:
                 )
             if not ok:
                 task = kb.get_task(conn, tid)
+                blockers = kb.unresolved_blockers_for_task(conn, tid)
+                if blockers:
+                    blocker_ids = ", ".join(item["id"] for item in blockers)
+                    return tool_error(
+                        f"kanban_complete blocked: unresolved parent dependencies: {blocker_ids}. "
+                        "Wait for those parent cards to finish before completing this task."
+                    )
                 approval_block = _workflow_approval_block_message(task)
                 if approval_block:
                     return tool_error(approval_block)

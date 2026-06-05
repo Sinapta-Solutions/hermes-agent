@@ -55,14 +55,14 @@ describe('kanban board density helpers', () => {
   })
 
   it('keeps small boards expanded and uses the default visible page size', () => {
-    const tasks = Array.from({ length: 3 }, (_, index) => task(`t${index}`, index === 0 ? 'triage' : 'ready'))
+    const tasks = Array.from({ length: 8 }, (_, index) => task(`t${index}`, index === 0 ? 'triage' : 'ready'))
 
     const triageView = buildKanbanColumnView({ status: 'triage', tasks })
     const readyView = buildKanbanColumnView({ status: 'ready', tasks })
 
     expect(triageView.collapsed).toBe(false)
-    expect(readyView.visibleTasks).toHaveLength(2)
-    expect(readyView.hiddenCount).toBe(0)
+    expect(readyView.visibleTasks).toHaveLength(DEFAULT_KANBAN_COLUMN_PAGE_SIZE)
+    expect(readyView.hiddenCount).toBe(2)
   })
 
   it('limits each expanded column independently and reports hidden cards', () => {

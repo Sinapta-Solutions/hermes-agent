@@ -276,6 +276,27 @@ def test_link_keeps_ready_child_when_parent_already_done(kanban_home):
         assert kb.get_task(conn, b).status == "ready"
 
 
+def test_link_reclaims_running_child_when_parent_not_done(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child")
+        assert kb.claim_task(conn, child, claimer="host:worker") is not None
+        run_id = kb.get_task(conn, child).current_run_id
+
+        kb.link_tasks(conn, parent, child)
+
+        task = kb.get_task(conn, child)
+        assert task.status == "todo"
+        assert task.claim_lock is None
+        assert task.claim_expires is None
+        assert task.worker_pid is None
+        assert task.current_run_id is None
+        run = conn.execute("SELECT status, outcome FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        assert dict(run) == {"status": "reclaimed", "outcome": "reclaimed"}
+        events = kb.list_events(conn, child)
+        assert any(event.kind == "dependency_added_while_running" for event in events)
+
+
 def test_link_rejects_self_loop(kanban_home):
     with kb.connect() as conn:
         a = kb.create_task(conn, title="a")
@@ -1026,6 +1047,75 @@ def test_complete_records_result(kanban_home):
     assert task.status == "done"
     assert task.result == "done and dusted"
     assert task.completed_at is not None
+
+
+def test_complete_refuses_unresolved_parent_added_after_claim(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child")
+        assert kb.claim_task(conn, child) is not None
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+            (parent, child),
+        )
+        conn.commit()
+
+        assert kb.complete_task(conn, child, result="stale done") is False
+        task = kb.get_task(conn, child)
+        assert task.status == "running"
+        assert task.result is None
+        events = kb.list_events(conn, child)
+        assert any(event.kind == "completion_blocked_unresolved_parents" for event in events)
+
+
+def test_worktree_completion_without_review_evidence_moves_to_review(kanban_home, tmp_path):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="isolated implementation",
+            workspace_kind="worktree",
+            workspace_path=str(tmp_path / "worktree"),
+            branch_name="hermes/kanban/test",
+        )
+        assert kb.claim_task(conn, task_id) is not None
+
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="implemented in worktree",
+            metadata={"changed_files": ["src/App.tsx"]},
+        ) is True
+
+        task = kb.get_task(conn, task_id)
+        assert task.status == "review"
+        assert task.completed_at is None
+        run = kb.latest_run(conn, task_id)
+        assert run.outcome == "review_required"
+        events = kb.list_events(conn, task_id)
+        assert any(event.kind == "worktree.review_required" for event in events)
+
+
+def test_worktree_completion_with_apply_evidence_can_finish(kanban_home, tmp_path):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="reviewed implementation",
+            workspace_kind="worktree",
+            workspace_path=str(tmp_path / "worktree"),
+            branch_name="hermes/kanban/test",
+        )
+        assert kb.claim_task(conn, task_id) is not None
+
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="applied after review",
+            metadata={"applied_to_target": True, "tests_run": ["pytest focused"]},
+        ) is True
+
+        task = kb.get_task(conn, task_id)
+        assert task.status == "done"
+        assert task.completed_at is not None
 
 
 def test_block_then_unblock(kanban_home):

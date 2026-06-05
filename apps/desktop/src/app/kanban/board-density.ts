@@ -1,8 +1,8 @@
 import type { KanbanStatus, KanbanTask } from '@/types/hermes'
 
 export const KANBAN_BOARD_COMPACT_THRESHOLD = 100
-export const DEFAULT_KANBAN_COLUMN_PAGE_SIZE = 10
-export const KANBAN_COLUMN_PAGE_SIZE_OPTIONS = [10, 25, 50] as const
+export const DEFAULT_KANBAN_COLUMN_PAGE_SIZE = 5
+export const KANBAN_COLUMN_PAGE_SIZE_OPTIONS = [5, 10, 25, 50] as const
 export const COLD_KANBAN_STATUSES: KanbanStatus[] = ['triage', 'scheduled', 'done', 'archived']
 
 export interface KanbanBoardDensity {
