@@ -2108,13 +2108,14 @@ def create_task(
     session_id: Optional[str] = None,
     board: Optional[str] = None,
     workflow_route: Optional[dict] = None,
+    explicit_status: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
     Returns the new task id.  Status is ``ready`` when there are no
     parents (or all parents already ``done``), otherwise ``todo``.
     If ``triage=True``, status is forced to ``triage`` regardless of
-    parents — a specifier/triager is expected to promote the task to
+    parents; a specifier/triager is expected to promote the task to
     ``todo`` once the spec is fleshed out.
 
     If ``idempotency_key`` is provided and a non-archived task with the
@@ -2140,6 +2141,10 @@ def create_task(
         raise ValueError(
             f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
         )
+    if explicit_status is not None:
+        explicit_status = str(explicit_status).strip().lower()
+        if explicit_status not in VALID_STATUSES or explicit_status == "archived":
+            raise ValueError(f"explicit_status must be one of {sorted(VALID_STATUSES - {'archived'})}")
     if workspace_kind not in VALID_WORKSPACE_KINDS:
         raise ValueError(
             f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
@@ -2250,9 +2255,16 @@ def create_task(
         try:
             with write_txn(conn):
                 # Determine task status from parent status, unless the caller
-                # parks it directly in blocked for human-ops review or in
+                # explicitly requests a final initial status (Desktop/API path),
+                # parks it directly in blocked for human-ops review, or in
                 # triage for a specifier.
-                if initial_status == "blocked":
+                if explicit_status is not None:
+                    task_status = explicit_status
+                    if parents:
+                        missing = _find_missing_parents(conn, parents)
+                        if missing:
+                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+                elif initial_status == "blocked":
                     task_status = "blocked"
                     if parents:
                         missing = _find_missing_parents(conn, parents)
@@ -2281,15 +2293,17 @@ def create_task(
                     if missing:
                         raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
 
+                started_at = now if task_status == "running" else None
+                completed_at = now if task_status == "done" else None
                 conn.execute(
                     """
                     INSERT INTO tasks (
                         id, title, body, assignee, status, priority,
-                        created_by, created_at, workspace_kind, workspace_path,
+                        created_by, created_at, started_at, completed_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         workflow_template_id, current_step_key, workflow_route,
                         skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2300,6 +2314,8 @@ def create_task(
                         priority,
                         created_by,
                         now,
+                        started_at,
+                        completed_at,
                         workspace_kind,
                         workspace_path,
                         branch_name,
@@ -2326,6 +2342,7 @@ def create_task(
                     task_id,
                     "created",
                     {
+                        "source": created_by,
                         "assignee": assignee,
                         "status": task_status,
                         "parents": list(parents),
@@ -2537,7 +2554,9 @@ def workflow_is_complete(route: Optional[dict]) -> bool:
 def _workflow_step_assignee(step: Optional[dict], fallback: Optional[str]) -> Optional[str]:
     if not step:
         return _canonical_assignee(fallback)
-    return _canonical_assignee(step.get("assignee") or fallback)
+    if "assignee" in step:
+        return _canonical_assignee(step.get("assignee"))
+    return _canonical_assignee(fallback)
 
 
 def _workflow_route_json(route: Optional[dict]) -> Optional[str]:
@@ -2575,6 +2594,7 @@ def _workflow_update_task_route_locked(
     *,
     status: Optional[str] = None,
     assignee: Optional[str] = None,
+    assignee_set: bool = False,
     current_step_key: Optional[str] = None,
     completed_at: Any = None,
     result: Any = None,
@@ -2596,7 +2616,7 @@ def _workflow_update_task_route_locked(
     if status is not None:
         assignments.append("status = ?")
         params.append(status)
-    if assignee is not None:
+    if assignee_set or assignee is not None:
         assignments.append("assignee = ?")
         params.append(assignee)
     if completed_at is not None:
@@ -2757,6 +2777,7 @@ def update_workflow_step(
     status: Optional[str] = None,
     evidence: Optional[str] = None,
     assignee: Optional[str] = None,
+    assignee_set: bool = False,
     actor: str = "cli",
     run_id: Optional[int] = None,
 ) -> dict:
@@ -2778,22 +2799,28 @@ def update_workflow_step(
             step.setdefault("timestamps", {})[f"{status}_at"] = int(time.time())
         if evidence:
             _workflow_set_step_evidence(step, text=evidence, kind="operator", run_id=run_id, now=int(time.time()))
-        if assignee is not None:
+        if assignee_set:
             step["assignee"] = _canonical_assignee(assignee)
         route = _refresh_workflow_route(route)
         next_step = workflow_next_ready_step(route)
         final = workflow_is_complete(route)
         current_step_id = None if final else (next_step.get("id") if next_step else route.get("current_step_id"))
         route["current_step_id"] = current_step_id
-        task_status = "done" if final else ("blocked" if status == "blocked" else row["status"])
-        if not final and next_step and task_status not in {"running", "blocked", "archived", "done"}:
+        if final:
+            task_status = "done"
+        elif status == "blocked":
+            task_status = "blocked"
+        elif status in {"passed", "failed", "skipped"} and next_step and row["status"] not in {"archived", "done"}:
             task_status = "ready"
+        else:
+            task_status = row["status"]
         _workflow_update_task_route_locked(
             conn,
             task_id,
             route,
             status=task_status,
             assignee=_workflow_step_assignee(next_step, row["assignee"]) if next_step else row["assignee"],
+            assignee_set=assignee_set or bool(next_step),
             current_step_key=current_step_id,
             completed_at=int(time.time()) if final else None,
         )

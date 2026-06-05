@@ -86,7 +86,7 @@ export interface KanbanWorkflowEvidence {
   timestamp?: null | number
 }
 
-export type KanbanWorkflowStepStatus = 'pending' | 'ready' | 'running' | 'passed' | 'blocked' | 'failed'
+export type KanbanWorkflowStepStatus = 'pending' | 'ready' | 'running' | 'passed' | 'blocked' | 'failed' | 'skipped'
 
 export interface KanbanWorkflowStep {
   assignee?: null | string

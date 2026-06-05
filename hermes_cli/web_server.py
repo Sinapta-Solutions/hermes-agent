@@ -2202,6 +2202,7 @@ async def create_kanban_task(slug: str, request: Request):
                 triage=status == "triage",
                 board=slug,
                 workflow_route=workflow_route,
+                explicit_status=status,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -2209,26 +2210,6 @@ async def create_kanban_task(slug: str, request: Request):
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=500, detail="Kanban task was not created")
-        if status != row["status"]:
-            updates: Dict[str, Any] = {"status": status}
-            now = int(time.time())
-            if status == "running" and not row["started_at"]:
-                updates["started_at"] = now
-            if status == "done":
-                updates["completed_at"] = now
-            assignments = ", ".join(f"{key} = ?" for key in updates)
-            conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", (*updates.values(), task_id))
-            conn.execute(
-                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
-                (
-                    task_id,
-                    "task.updated",
-                    json.dumps({"source": "desktop", "changes": {"status": {"from": row["status"], "to": status}}}, ensure_ascii=False),
-                    now,
-                ),
-            )
-            conn.commit()
-            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return JSONResponse(status_code=201, content={"object": "hermes.kanban.task", "task": _task_response(row)})
     finally:
         conn.close()
@@ -2624,7 +2605,9 @@ async def update_kanban_task_workflow_step(slug: str, task_id: str, step_id: str
     if not any(key in body for key in ("status", "assignee", "evidence")):
         raise HTTPException(status_code=400, detail="Pass status, assignee, or evidence")
     status = str(body.get("status") or "").strip().lower() or None if "status" in body else None
-    assignee = str(body.get("assignee") or "").strip() if "assignee" in body else None
+    assignee = None
+    if "assignee" in body and body.get("assignee") is not None:
+        assignee = str(body.get("assignee") or "").strip() or None
     evidence = str(body.get("evidence") or "").strip() or None if "evidence" in body else None
 
     conn = _connect_kanban_board(slug)
@@ -2641,6 +2624,7 @@ async def update_kanban_task_workflow_step(slug: str, task_id: str, step_id: str
                 status=status,
                 evidence=evidence,
                 assignee=assignee,
+                assignee_set="assignee" in body,
                 actor="desktop",
             )
         except ValueError as exc:

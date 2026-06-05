@@ -66,6 +66,21 @@ describe('kanban workflow helpers', () => {
     expect(workflowEvidencePreview(workflowCurrentStepForTask(item))).toBe('review proof')
   })
 
+  it('counts skipped workflow steps as terminal progress', () => {
+    const item = task({
+      workflowRoute: {
+        current_step_id: null,
+        steps: [
+          { id: 'plan', status: 'passed', title: 'Plan' },
+          { id: 'optional', status: 'skipped', title: 'Optional' }
+        ],
+        version: 1
+      }
+    })
+
+    expect(workflowProgress(item)).toEqual({ passed: 2, total: 2 })
+  })
+
   it('converts workflow card drops to semantic step status only for done/blocked', () => {
     const item = task({
       workflowRoute: {

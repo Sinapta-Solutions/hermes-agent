@@ -99,7 +99,7 @@ const EMPTY_WORKFLOW_STEP_FORM: WorkflowStepFormState = {
   validation_criteria: ''
 }
 
-const WORKFLOW_STEP_STATUSES: KanbanWorkflowStepStatus[] = ['pending', 'ready', 'running', 'passed', 'blocked', 'failed']
+const WORKFLOW_STEP_STATUSES: KanbanWorkflowStepStatus[] = ['pending', 'ready', 'running', 'passed', 'blocked', 'failed', 'skipped']
 
 const STATUSES: Array<{ accent: string; description: string; label: string; value: KanbanStatus }> = [
   { value: 'triage', label: 'Triage', description: 'Entrada bruta para especificar', accent: 'var(--ui-orange)' },

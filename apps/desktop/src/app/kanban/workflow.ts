@@ -18,7 +18,7 @@ export function workflowCurrentStepForTask(task: KanbanTask | null | undefined) 
 
 export function workflowProgress(task: KanbanTask | null | undefined) {
   const steps = workflowStepsForTask(task)
-  const passed = steps.filter(step => step.status === 'passed').length
+  const passed = steps.filter(step => step.status === 'passed' || step.status === 'skipped').length
 
   return { passed, total: steps.length }
 }

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -174,6 +175,147 @@ def test_desktop_kanban_workflow_step_endpoints_add_and_update_step(tmp_path, mo
     assert review["status"] == "blocked"
     assert review["assignee"] == "auditor"
     assert review["evidence"][-1]["text"] == "needs rework"
+
+
+
+def test_desktop_kanban_create_uses_requested_initial_status_atomically(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="status")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+
+    created = client.post(
+        "/api/kanban/boards/status/tasks",
+        headers=headers,
+        json={"title": "scheduled directly", "status": "scheduled"},
+    )
+    assert created.status_code == 201
+    task = created.json()["task"]
+    assert task["status"] == "scheduled"
+
+    conn = sqlite3.connect(tmp_path / "kanban" / "boards" / "status" / "kanban.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
+            (task["id"],),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [(event["kind"], json.loads(event["payload"]).get("status")) for event in events] == [("created", "scheduled")]
+
+
+
+def test_desktop_kanban_workflow_step_passed_unblocks_ready_next_step(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="blocked-wf")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    route = {
+        "version": kanban_db.WORKFLOW_ROUTE_VERSION,
+        "template_id": "blocked-recovery",
+        "steps": [
+            {"id": "plan", "title": "Plan", "type": "planning", "assignee": "planner"},
+            {"id": "review", "title": "Review", "type": "review", "assignee": "reviewer", "depends_on": ["plan"]},
+        ],
+    }
+    created = client.post(
+        "/api/kanban/boards/blocked-wf/tasks",
+        headers=headers,
+        json={"title": "blocked recovery", "workflowRoute": route},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+
+    blocked = client.patch(
+        f"/api/kanban/boards/blocked-wf/tasks/{task_id}/workflow/steps/plan",
+        headers=headers,
+        json={"status": "blocked"},
+    )
+    assert blocked.status_code == 200
+    assert blocked.json()["task"]["status"] == "blocked"
+
+    passed = client.patch(
+        f"/api/kanban/boards/blocked-wf/tasks/{task_id}/workflow/steps/plan",
+        headers=headers,
+        json={"status": "passed"},
+    )
+    assert passed.status_code == 200
+    task = passed.json()["task"]
+    assert task["status"] == "ready"
+    assert task["current_step_key"] == "review"
+    assert task["assignee"] == "reviewer"
+
+
+
+def test_desktop_kanban_workflow_step_allows_clearing_assignee(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="clear-assignee")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    route = {
+        "version": kanban_db.WORKFLOW_ROUTE_VERSION,
+        "template_id": "clear-assignee",
+        "steps": [{"id": "plan", "title": "Plan", "type": "planning", "assignee": "planner"}],
+    }
+    created = client.post(
+        "/api/kanban/boards/clear-assignee/tasks",
+        headers=headers,
+        json={"title": "clear assignee", "assignee": "fallback", "workflowRoute": route},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+
+    cleared = client.patch(
+        f"/api/kanban/boards/clear-assignee/tasks/{task_id}/workflow/steps/plan",
+        headers=headers,
+        json={"assignee": None},
+    )
+    assert cleared.status_code == 200
+    step = cleared.json()["task"]["workflowRoute"]["steps"][0]
+    assert step["assignee"] is None
+    assert cleared.json()["task"]["assignee"] is None
+
+
+
+def test_desktop_kanban_workflow_evidence_does_not_unblock_blocked_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _seed_board(tmp_path, slug="blocked-note")
+
+    from hermes_cli.web_server import _SESSION_TOKEN, app
+
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    route = {
+        "version": kanban_db.WORKFLOW_ROUTE_VERSION,
+        "template_id": "blocked-note",
+        "steps": [{"id": "plan", "title": "Plan", "type": "planning", "assignee": "planner"}],
+    }
+    created = client.post(
+        "/api/kanban/boards/blocked-note/tasks",
+        headers=headers,
+        json={"title": "blocked note", "status": "blocked", "workflowRoute": route},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task"]["id"]
+
+    noted = client.patch(
+        f"/api/kanban/boards/blocked-note/tasks/{task_id}/workflow/steps/plan",
+        headers=headers,
+        json={"evidence": "note only"},
+    )
+    assert noted.status_code == 200
+    assert noted.json()["task"]["status"] == "blocked"
 
 
 
