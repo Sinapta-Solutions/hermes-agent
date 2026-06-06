@@ -17,6 +17,9 @@ import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
 
 import { commitPathsForGitChanges, nextSelectedGitChangePath, selectedGitRepositoryId } from './git-changes'
+import { buildSideBySideDiffRows, type SideBySideDiffRow, type SideBySideDiffRowKind } from './git-diff'
+
+type GitDiffViewMode = 'side-by-side' | 'unified'
 
 interface GitChangesPanelProps {
   boardSlug: null | string
@@ -44,6 +47,7 @@ export function GitChangesPanel({ boardSlug }: GitChangesPanelProps) {
   const [files, setFiles] = useState<KanbanGitChangeFile[]>([])
   const [selectedPath, setSelectedPath] = useState<null | string>(null)
   const [diff, setDiff] = useState('')
+  const [diffViewMode, setDiffViewMode] = useState<GitDiffViewMode>('unified')
   const [commitMessage, setCommitMessage] = useState('')
   const [loadingRepos, setLoadingRepos] = useState(false)
   const [loadingStatus, setLoadingStatus] = useState(false)
@@ -57,6 +61,7 @@ export function GitChangesPanel({ boardSlug }: GitChangesPanelProps) {
 
   const selectedFile = useMemo(() => files.find(file => file.path === selectedPath) ?? null, [files, selectedPath])
   const commitPaths = useMemo(() => commitPathsForGitChanges(files), [files])
+  const sideBySideRows = useMemo(() => buildSideBySideDiffRows(diff), [diff])
 
   const loadRepositories = useCallback(async () => {
     if (!boardSlug) {
@@ -189,26 +194,26 @@ export function GitChangesPanel({ boardSlug }: GitChangesPanelProps) {
 
   return (
     <section
-      className="rounded-2xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3"
+      className="rounded-2xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-4"
       onClick={event => event.stopPropagation()}
     >
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-(--ui-text-primary)">
             <Codicon name="git-compare" />
             Git Changes
           </div>
-          <div className="mt-1 text-xs text-(--ui-text-tertiary)">Mudanças do repositório ligado a este Kanban.</div>
+          <div className="mt-0.5 text-xs text-(--ui-text-tertiary)">Mudanças do repositório ligado a este Kanban.</div>
         </div>
-        <Button onClick={() => void loadStatus()} type="button" variant="secondary">
+        <Button onClick={() => void loadStatus()} size="sm" type="button" variant="ghost">
           Refresh Git
         </Button>
       </div>
 
-      <div className="grid min-h-[28rem] grid-cols-[22rem_1fr] gap-3">
-        <aside className="min-w-0 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
+      <div className="grid min-h-[28rem] grid-cols-[20rem_minmax(0,1fr)] gap-4">
+        <aside className="min-w-0 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3">
           <div className="space-y-2">
-            <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">Repositório</div>
+            <div className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-(--ui-text-quaternary)">Repositório</div>
             {repositories.length ? (
               <Select onValueChange={value => setSelectedRepoId(value)} value={selectedRepoId ?? repositories[0]?.id}>
                 <SelectTrigger className={SELECT_TRIGGER_CLASS}>
@@ -223,26 +228,26 @@ export function GitChangesPanel({ boardSlug }: GitChangesPanelProps) {
                 </SelectContent>
               </Select>
             ) : (
-              <div className="rounded-lg border border-dashed border-(--ui-stroke-secondary) p-3 text-xs text-(--ui-text-quaternary)">
+              <div className="rounded-lg border border-dashed border-(--ui-stroke-secondary) px-3 py-2 text-xs text-(--ui-text-quaternary)">
                 {loadingRepos ? 'Carregando repos…' : 'Nenhum repo Git configurado neste board.'}
               </div>
             )}
             {selectedRepository && (
-              <div className="space-y-1 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-2 text-xs">
-                <div className="truncate text-(--ui-text-primary)" title={selectedRepository.path}>
+              <div className="space-y-1 rounded-lg bg-(--ui-bg-secondary) px-3 py-2 text-xs">
+                <div className="truncate text-(--ui-text-secondary)" title={selectedRepository.path}>
                   {selectedRepository.path}
                 </div>
-                <div className="text-(--ui-text-tertiary)">
+                <div className="text-(--ui-text-quaternary)">
                   Branch: {selectedRepository.branch || '—'} · {selectedRepository.source === 'task' ? 'card' : 'board'}
                 </div>
               </div>
             )}
           </div>
 
-          <div className="mt-3 space-y-2">
-            <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">Commit manual</div>
+          <div className="mt-4 space-y-2">
+            <div className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-(--ui-text-quaternary)">Commit manual</div>
             <Input
-              className="border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) text-(--ui-text-primary)"
+              className="border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-primary)"
               onChange={event => setCommitMessage(event.target.value)}
               placeholder="Mensagem de commit"
               value={commitMessage}
@@ -251,6 +256,7 @@ export function GitChangesPanel({ boardSlug }: GitChangesPanelProps) {
               className="w-full"
               disabled={committing || !selectedRepoId || !commitMessage.trim() || commitPaths.length === 0}
               onClick={() => void commitPush()}
+              size="sm"
               type="button"
               variant="secondary"
             >
@@ -261,24 +267,24 @@ export function GitChangesPanel({ boardSlug }: GitChangesPanelProps) {
             )}
           </div>
 
-          <div className="mt-3 space-y-2">
+          <div className="mt-4 space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">Arquivos</div>
+              <div className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-(--ui-text-quaternary)">Arquivos</div>
               <span className="text-[0.68rem] text-(--ui-text-quaternary)">{files.length}</span>
             </div>
-            <div className="max-h-[22rem] space-y-1 overflow-y-auto pr-1">
+            <div className="max-h-[22rem] overflow-y-auto rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)">
               {loadingStatus ? (
-                <div className="rounded-lg border border-dashed border-(--ui-stroke-secondary) p-3 text-xs text-(--ui-text-quaternary)">Carregando Git changes…</div>
+                <div className="p-3 text-xs text-(--ui-text-quaternary)">Carregando Git changes…</div>
               ) : files.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-(--ui-stroke-secondary) p-3 text-xs text-(--ui-text-quaternary)">Sem mudanças.</div>
+                <div className="p-3 text-xs text-(--ui-text-quaternary)">Sem mudanças.</div>
               ) : (
                 files.map(file => (
                   <button
                     className={cn(
-                      'w-full rounded-lg border p-2 text-left text-xs transition',
+                      'w-full border-l-2 px-3 py-2 text-left text-xs transition not-last:border-b not-last:border-(--ui-stroke-secondary)',
                       selectedPath === file.path
-                        ? 'border-(--ui-accent) bg-(--ui-control-hover-background) text-(--ui-text-primary)'
-                        : 'border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) text-(--ui-text-secondary) hover:border-(--ui-stroke-primary) hover:text-(--ui-text-primary)'
+                        ? 'border-l-[var(--ui-accent)] bg-(--ui-control-hover-background) text-(--ui-text-primary)'
+                        : 'border-l-transparent text-(--ui-text-secondary) hover:bg-(--ui-control-hover-background) hover:text-(--ui-text-primary)'
                     )}
                     key={file.path}
                     onClick={() => setSelectedPath(file.path)}
@@ -297,33 +303,153 @@ export function GitChangesPanel({ boardSlug }: GitChangesPanelProps) {
           </div>
         </aside>
 
-        <div className="min-w-0 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-3">
-          <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="min-w-0 overflow-hidden rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome)">
+          <div className="flex items-center justify-between gap-3 border-b border-(--ui-stroke-secondary) px-3 py-2">
             <div className="min-w-0">
-              <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">Diff</div>
+              <div className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-(--ui-text-quaternary)">Diff</div>
               <div className="truncate text-sm font-semibold text-(--ui-text-primary)" title={selectedPath ?? undefined}>
                 {selectedPath ?? 'Selecione um arquivo'}
               </div>
             </div>
+            {diff && <DiffViewModeToggle mode={diffViewMode} onChange={setDiffViewMode} />}
           </div>
 
-          {!selectedPath ? (
-            <div className="rounded-xl border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-quaternary)">
-              Selecione um arquivo à esquerda para ver o diff.
-            </div>
-          ) : selectedFile?.sensitive ? (
-            <div className="rounded-xl border border-(--ui-red) bg-(--ui-bg-elevated) p-6 text-sm text-(--ui-text-secondary)">
-              Diff bloqueado para arquivo sensível. Bonito seria vazar token no painel, né? Não.
-            </div>
-          ) : loadingDiff ? (
-            <div className="rounded-xl border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-quaternary)">Carregando diff…</div>
-          ) : diff ? (
-            <DiffLines className="mt-0 max-h-[32rem] bg-(--ui-bg-elevated)" text={diff} />
-          ) : (
-            <div className="rounded-xl border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-quaternary)">Sem diff textual para este arquivo.</div>
-          )}
+          <div className="p-3">
+            {!selectedPath ? (
+              <div className="rounded-xl border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-quaternary)">
+                Selecione um arquivo à esquerda para ver o diff.
+              </div>
+            ) : selectedFile?.sensitive ? (
+              <div className="rounded-xl border border-(--ui-red) bg-(--ui-bg-secondary) p-6 text-sm text-(--ui-text-secondary)">
+                Diff bloqueado para arquivo sensível. Bonito seria vazar token no painel, né? Não.
+              </div>
+            ) : loadingDiff ? (
+              <div className="rounded-xl border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-quaternary)">Carregando diff…</div>
+            ) : diff ? (
+              diffViewMode === 'unified' ? (
+                <DiffLines className="mt-0 max-h-[32rem] bg-(--ui-bg-elevated)" text={diff} />
+              ) : (
+                <SideBySideDiff rows={sideBySideRows} />
+              )
+            ) : (
+              <div className="rounded-xl border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-quaternary)">Sem diff textual para este arquivo.</div>
+            )}
+          </div>
         </div>
       </div>
     </section>
+  )
+}
+
+function DiffViewModeToggle({
+  mode,
+  onChange
+}: {
+  mode: GitDiffViewMode
+  onChange: (mode: GitDiffViewMode) => void
+}) {
+  const options: Array<{ label: string; value: GitDiffViewMode }> = [
+    { label: 'Unified', value: 'unified' },
+    { label: 'Lado a lado', value: 'side-by-side' }
+  ]
+
+  return (
+    <div className="flex rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-0.5">
+      {options.map(option => (
+        <button
+          className={cn(
+            'rounded-md px-2 py-1 text-[0.68rem] font-medium transition',
+            mode === option.value
+              ? 'bg-(--ui-control-hover-background) text-(--ui-text-primary)'
+              : 'text-(--ui-text-quaternary) hover:text-(--ui-text-primary)'
+          )}
+          key={option.value}
+          onClick={() => onChange(option.value)}
+          type="button"
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function SideBySideDiff({ rows }: { rows: SideBySideDiffRow[] }) {
+  return (
+    <div className="max-h-[32rem] overflow-auto rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) font-mono text-[0.7rem] leading-relaxed">
+      <div className="sticky top-0 z-10 grid min-w-[64rem] grid-cols-2 border-b border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-(--ui-text-quaternary)">
+        <div className="border-r border-(--ui-stroke-secondary) px-3 py-2">Antes</div>
+        <div className="px-3 py-2">Depois</div>
+      </div>
+      <div className="min-w-[64rem]">
+        {rows.map((row, index) => (
+          <SideBySideDiffRowView key={`${index}-${row.kind}-${row.meta ?? row.oldText ?? ''}-${row.newText ?? ''}`} row={row} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SideBySideDiffRowView({ row }: { row: SideBySideDiffRow }) {
+  if (row.kind === 'meta') {
+    return (
+      <div className="border-b border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-3 py-1.5 text-(--ui-cyan)">
+        {row.meta || ' '}
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid grid-cols-2 border-b border-(--ui-stroke-secondary)">
+      <SideBySideDiffCell kind={row.kind} side="old" text={row.oldText ?? ''} />
+      <SideBySideDiffCell kind={row.kind} side="new" text={row.newText ?? ''} />
+    </div>
+  )
+}
+
+function diffCellPrefix(kind: SideBySideDiffRowKind, side: 'new' | 'old') {
+  if ((kind === 'removed' || kind === 'changed') && side === 'old') {
+    return '−'
+  }
+
+  if ((kind === 'added' || kind === 'changed') && side === 'new') {
+    return '+'
+  }
+
+  return ' '
+}
+
+function diffCellTone(kind: SideBySideDiffRowKind, side: 'new' | 'old') {
+  if ((kind === 'removed' || kind === 'changed') && side === 'old') {
+    return 'bg-[color-mix(in_srgb,var(--ui-red)_10%,transparent)] text-(--ui-red)'
+  }
+
+  if ((kind === 'added' || kind === 'changed') && side === 'new') {
+    return 'bg-[color-mix(in_srgb,var(--ui-green)_10%,transparent)] text-(--ui-green)'
+  }
+
+  return 'text-(--ui-text-secondary)'
+}
+
+function SideBySideDiffCell({
+  kind,
+  side,
+  text
+}: {
+  kind: SideBySideDiffRowKind
+  side: 'new' | 'old'
+  text: string
+}) {
+  return (
+    <div
+      className={cn(
+        'min-h-7 whitespace-pre px-3 py-1.5',
+        side === 'old' && 'border-r border-(--ui-stroke-secondary)',
+        diffCellTone(kind, side)
+      )}
+    >
+      <span className="mr-2 select-none text-(--ui-text-quaternary)">{diffCellPrefix(kind, side)}</span>
+      {text || ' '}
+    </div>
   )
 }
