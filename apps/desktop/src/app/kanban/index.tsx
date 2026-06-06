@@ -49,6 +49,13 @@ import { notify, notifyError } from '@/store/notifications'
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
 import { buildKanbanColumnView, getKanbanBoardDensity, nextKeyboardTaskId } from './board-density'
+import {
+  hasKanbanDispatcherAttention,
+  type KanbanDispatcherHealth,
+  kanbanDispatcherHealth,
+  kanbanDispatcherLabel,
+  kanbanDispatcherSummary
+} from './dispatcher-status'
 import { GitChangesPanel } from './git-changes-panel'
 import { groupKanbanRunTranscript, isKanbanTaskLive } from './runs'
 import {
@@ -811,8 +818,8 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
             <DispatcherStatusPanel
               onRefresh={() =>
                 selectedBoard?.slug
-                  ? void refreshDispatcherStatus(selectedBoard.slug).catch(error => notifyError(error, 'Failed to load dispatcher status'))
-                  : undefined
+                  ? refreshDispatcherStatus(selectedBoard.slug).catch(error => notifyError(error, 'Failed to load dispatcher status'))
+                  : Promise.resolve(null)
               }
               status={dispatcherStatus}
             />
@@ -972,73 +979,216 @@ function DispatcherStatusPanel({
   onRefresh,
   status
 }: {
-  onRefresh: () => void
+  onRefresh: () => Promise<unknown> | void
   status: KanbanDispatcherStatusResponse | null
 }) {
-  if (!status) {
-    return (
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 text-xs text-(--ui-text-tertiary)">
-        <span>Diagnóstico dispatcher: carregando…</span>
-        <Button onClick={onRefresh} size="sm" type="button" variant="secondary">
-          Diagnóstico
-        </Button>
-      </div>
-    )
-  }
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const health = kanbanDispatcherHealth(status)
+  const attention = hasKanbanDispatcherAttention(status)
 
-  const healthy = status.dispatch_in_gateway && status.gateway_pid
+  const refreshDiagnostics = useCallback(async () => {
+    setRefreshing(true)
+
+    try {
+      await onRefresh()
+    } finally {
+      setRefreshing(false)
+    }
+  }, [onRefresh])
+
+  const toggleDiagnostics = useCallback(() => {
+    const next = !diagnosticsOpen
+
+    setDiagnosticsOpen(next)
+
+    if (next) {
+      void refreshDiagnostics()
+    }
+  }, [diagnosticsOpen, refreshDiagnostics])
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 text-xs">
-        <div className="flex flex-wrap items-center gap-2 text-(--ui-text-secondary)">
-          <span className={cn('rounded px-2 py-1', healthy ? 'bg-(--ui-bg-secondary) text-(--ui-green)' : 'bg-(--ui-bg-secondary) text-(--ui-red)')}>
-            dispatcher {healthy ? `ativo pid ${status.gateway_pid}` : 'sem gateway ativo'}
-          </span>
-          <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
-            dispatch_in_gateway={String(status.dispatch_in_gateway)}
-          </span>
-          <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
-            ready {status.ready_count} · running {status.running_count} · stale {status.stale_running_count}
-          </span>
-          <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-tertiary)">
-            runs ativos {status.active_runs.length}
-          </span>
-          <span className={cn('rounded bg-(--ui-bg-secondary) px-2 py-1', status.pending_approvals_count > 0 ? 'text-(--ui-orange)' : 'text-(--ui-text-tertiary)')}>
-            approvals {status.pending_approvals_count}
-          </span>
-          {status.invalid_workflow_route_count ? (
-            <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-red)">
-              rotas inválidas {status.invalid_workflow_route_count}
-            </span>
-          ) : null}
-          <span className="rounded bg-(--ui-bg-secondary) px-2 py-1 text-(--ui-text-quaternary)">
-            ↑↓ seleciona · Enter abre · N novo · R refresh
-          </span>
-        </div>
-        <Button onClick={onRefresh} size="sm" type="button" variant="secondary">
-          Diagnóstico
-        </Button>
-      </div>
-      {status.active_runs.length > 0 && (
-        <div className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-3 text-xs">
-          <div className="mb-2 font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">Runs ativos</div>
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {status.active_runs.map(run => (
-              <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-2" key={`${run.task_id}-${run.id}`}>
-                <div className="flex items-center justify-between gap-2 text-(--ui-text-primary)">
-                  <span className="line-clamp-1">{run.title}</span>
-                  <span className="rounded bg-(--ui-red) px-1.5 py-0.5 text-white">Live</span>
-                </div>
-                <div className="mt-1 text-(--ui-text-tertiary)">
-                  run {run.id} · {run.profile || 'perfil?'} · {run.step_key || 'sem etapa'}
-                </div>
-                <div className="mt-1 text-(--ui-text-quaternary)">heartbeat {formatTime(run.last_heartbeat_at)}</div>
-              </div>
-            ))}
+    <section className="rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-3 py-2 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <DispatcherHealthDot health={health} />
+          <div className="min-w-0">
+            <div className={cn('font-semibold', dispatcherHealthTextClass(health))}>{kanbanDispatcherLabel(status)}</div>
+            <div className="mt-0.5 truncate text-(--ui-text-tertiary)">{kanbanDispatcherSummary(status)}</div>
           </div>
         </div>
+
+        <div className="flex flex-wrap items-center justify-end gap-2 text-(--ui-text-quaternary)">
+          {status?.active_runs.length ? <StatusSummaryPill tone="live">{status.active_runs.length} live</StatusSummaryPill> : null}
+          {status?.pending_approvals_count ? <StatusSummaryPill tone="warning">{status.pending_approvals_count} aprovações</StatusSummaryPill> : null}
+          {status?.invalid_workflow_route_count ? <StatusSummaryPill tone="danger">{status.invalid_workflow_route_count} rotas inválidas</StatusSummaryPill> : null}
+          {status?.stale_running_count ? <StatusSummaryPill tone="danger">{status.stale_running_count} stale</StatusSummaryPill> : null}
+          {!attention && status ? <span className="hidden lg:inline">↑↓ seleciona · Enter abre · N novo · R refresh</span> : null}
+          <Button
+            aria-controls="kanban-dispatcher-diagnostics"
+            aria-expanded={diagnosticsOpen}
+            onClick={toggleDiagnostics}
+            size="sm"
+            type="button"
+            variant={attention ? 'secondary' : 'ghost'}
+          >
+            <Codicon name={diagnosticsOpen ? 'chevron-up' : 'pulse'} />
+            {diagnosticsOpen ? 'Ocultar' : 'Diagnóstico'}
+          </Button>
+        </div>
+      </div>
+
+      {diagnosticsOpen && (
+        <div
+          className="mt-3 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-chrome) p-3"
+          id="kanban-dispatcher-diagnostics"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-(--ui-accent)">Diagnóstico Kanban</div>
+              <div className="mt-1 text-(--ui-text-tertiary)">Estado operacional do dispatcher e da fila atual.</div>
+            </div>
+            <Button disabled={refreshing} onClick={() => void refreshDiagnostics()} size="sm" type="button" variant="secondary">
+              {refreshing ? 'Atualizando…' : 'Atualizar'}
+            </Button>
+          </div>
+
+          {status ? (
+            <>
+              <div className="mt-3 grid gap-2 md:grid-cols-4">
+                <DispatcherDiagnosticItem
+                  label="Gateway"
+                  tone={health === 'offline' ? 'danger' : 'ok'}
+                  value={status.gateway_pid ? `PID ${status.gateway_pid}` : 'Sem gateway'}
+                />
+                <DispatcherDiagnosticItem
+                  label="Fila"
+                  value={`${status.ready_count} prontos · ${status.running_count} rodando`}
+                />
+                <DispatcherDiagnosticItem
+                  label="Execução"
+                  tone={status.stale_running_count > 0 ? 'danger' : 'neutral'}
+                  value={`${status.active_runs.length} runs · ${status.stale_running_count} stale`}
+                />
+                <DispatcherDiagnosticItem
+                  label="Bloqueios"
+                  tone={status.pending_approvals_count || status.invalid_workflow_route_count ? 'warning' : 'neutral'}
+                  value={`${status.pending_approvals_count} approvals · ${status.invalid_workflow_route_count ?? 0} rotas`}
+                />
+              </div>
+
+              <div className="mt-3 grid gap-2 text-[0.68rem] text-(--ui-text-quaternary) md:grid-cols-3">
+                <div>dispatch_in_gateway: {String(status.dispatch_in_gateway)}</div>
+                <div>último evento: {formatTime(status.last_event_at)}</div>
+                <div>board: {status.board?.slug ?? '—'}</div>
+              </div>
+
+              {status.active_runs.length > 0 && (
+                <div className="mt-3">
+                  <div className="mb-2 text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-(--ui-text-tertiary)">Runs ativos</div>
+                  <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                    {status.active_runs.map(run => (
+                      <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-2" key={`${run.task_id}-${run.id}`}>
+                        <div className="flex items-center justify-between gap-2 text-(--ui-text-primary)">
+                          <span className="line-clamp-1">{run.title}</span>
+                          <span className="rounded bg-(--ui-green) px-1.5 py-0.5 text-(--ui-bg-chrome)">Live</span>
+                        </div>
+                        <div className="mt-1 text-(--ui-text-tertiary)">
+                          run {run.id} · {run.profile || 'perfil?'} · {run.step_key || 'sem etapa'}
+                        </div>
+                        <div className="mt-1 text-(--ui-text-quaternary)">heartbeat {formatTime(run.last_heartbeat_at)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="mt-3 rounded-lg border border-dashed border-(--ui-stroke-secondary) p-3 text-(--ui-text-tertiary)">
+              Carregando diagnóstico do dispatcher…
+            </div>
+          )}
+        </div>
       )}
+    </section>
+  )
+}
+
+function DispatcherHealthDot({ health }: { health: KanbanDispatcherHealth }) {
+  return <span className={cn('size-2.5 shrink-0 rounded-full', dispatcherHealthDotClass(health))} />
+}
+
+function dispatcherHealthDotClass(health: KanbanDispatcherHealth) {
+  if (health === 'healthy') {
+    return 'bg-(--ui-green)'
+  }
+
+  if (health === 'warning') {
+    return 'bg-(--ui-orange)'
+  }
+
+  if (health === 'loading') {
+    return 'bg-(--ui-text-quaternary)'
+  }
+
+  return 'bg-(--ui-red)'
+}
+
+function dispatcherHealthTextClass(health: KanbanDispatcherHealth) {
+  if (health === 'healthy') {
+    return 'text-(--ui-green)'
+  }
+
+  if (health === 'warning') {
+    return 'text-(--ui-orange)'
+  }
+
+  if (health === 'loading') {
+    return 'text-(--ui-text-tertiary)'
+  }
+
+  return 'text-(--ui-red)'
+}
+
+function StatusSummaryPill({ children, tone }: { children: React.ReactNode; tone: 'danger' | 'live' | 'warning' }) {
+  return (
+    <span
+      className={cn(
+        'rounded-full border px-2 py-0.5 text-[0.68rem]',
+        tone === 'live' && 'border-(--ui-green) text-(--ui-green)',
+        tone === 'warning' && 'border-(--ui-orange) text-(--ui-orange)',
+        tone === 'danger' && 'border-(--ui-red) text-(--ui-red)'
+      )}
+    >
+      {children}
+    </span>
+  )
+}
+
+function DispatcherDiagnosticItem({
+  label,
+  tone = 'neutral',
+  value
+}: {
+  label: string
+  tone?: 'danger' | 'neutral' | 'ok' | 'warning'
+  value: string
+}) {
+  return (
+    <div className="rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-2">
+      <div className="text-[0.65rem] uppercase tracking-[0.14em] text-(--ui-text-quaternary)">{label}</div>
+      <div
+        className={cn(
+          'mt-1 truncate font-medium',
+          tone === 'ok' && 'text-(--ui-green)',
+          tone === 'warning' && 'text-(--ui-orange)',
+          tone === 'danger' && 'text-(--ui-red)',
+          tone === 'neutral' && 'text-(--ui-text-primary)'
+        )}
+        title={value}
+      >
+        {value}
+      </div>
     </div>
   )
 }
