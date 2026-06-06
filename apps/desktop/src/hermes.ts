@@ -24,6 +24,12 @@ import type {
   KanbanCommentMutationResponse,
   KanbanCommentPayload,
   KanbanDispatcherStatusResponse,
+  KanbanGitCommitPushPayload,
+  KanbanGitCommitPushResponse,
+  KanbanGitDiffResponse,
+  KanbanGitRepositoriesResponse,
+  KanbanGitRepository,
+  KanbanGitStatusResponse,
   KanbanRun,
   KanbanTask,
   KanbanTaskDetailResponse,
@@ -102,6 +108,13 @@ export type {
   KanbanDispatcherStatusResponse,
   KanbanEvent,
   KanbanFailure,
+  KanbanGitChangeFile,
+  KanbanGitCommitPushPayload,
+  KanbanGitCommitPushResponse,
+  KanbanGitDiffResponse,
+  KanbanGitRepositoriesResponse,
+  KanbanGitRepository,
+  KanbanGitStatusResponse,
   KanbanRun,
   KanbanStatus,
   KanbanTask,
@@ -190,6 +203,39 @@ export function getWorkspaceEvents(id: string, limit = 25): Promise<WorkspaceEve
 
 export function getKanbanBoards(): Promise<KanbanBoard[]> {
   return window.hermesDesktop.api<KanbanBoardsResponse>({ path: '/api/kanban/boards' }).then(result => result.boards)
+}
+
+export function getKanbanGitRepositories(boardSlug: string): Promise<KanbanGitRepository[]> {
+  return window.hermesDesktop
+    .api<KanbanGitRepositoriesResponse>({ path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/git/repos` })
+    .then(result => result.repos)
+}
+
+export function getKanbanGitStatus(boardSlug: string, repoId?: null | string): Promise<KanbanGitStatusResponse> {
+  const query = repoId ? `?repo_id=${encodeURIComponent(repoId)}` : ''
+
+  return window.hermesDesktop.api<KanbanGitStatusResponse>({
+    path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/git/status${query}`
+  })
+}
+
+export function getKanbanGitDiff(boardSlug: string, repoId: string, path: string): Promise<KanbanGitDiffResponse> {
+  const query = new URLSearchParams({ repo_id: repoId, path }).toString()
+
+  return window.hermesDesktop.api<KanbanGitDiffResponse>({
+    path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/git/diff?${query}`
+  })
+}
+
+export function commitPushKanbanGitChanges(
+  boardSlug: string,
+  body: KanbanGitCommitPushPayload
+): Promise<KanbanGitCommitPushResponse> {
+  return window.hermesDesktop.api<KanbanGitCommitPushResponse>({
+    path: `/api/kanban/boards/${encodeURIComponent(boardSlug)}/git/commit-push`,
+    method: 'POST',
+    body
+  })
 }
 
 export function getKanbanTasks(boardSlug: string): Promise<KanbanTasksResponse> {

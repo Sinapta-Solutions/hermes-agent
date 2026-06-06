@@ -91,6 +91,62 @@ export interface KanbanBoardsResponse {
   object: 'list'
 }
 
+export interface KanbanGitRepository {
+  branch?: null | string
+  id: string
+  label: string
+  path: string
+  source: 'board' | 'task'
+  task_id?: null | string
+}
+
+export interface KanbanGitRepositoriesResponse {
+  board: string
+  object: 'hermes.kanban.git.repos'
+  repos: KanbanGitRepository[]
+}
+
+export interface KanbanGitChangeFile {
+  original_path?: string
+  path: string
+  raw_status: string
+  sensitive: boolean
+  staged: boolean
+  status: 'added' | 'changed' | 'conflicted' | 'copied' | 'deleted' | 'modified' | 'renamed' | 'untracked'
+}
+
+export interface KanbanGitStatusResponse {
+  board: string
+  files: KanbanGitChangeFile[]
+  object: 'hermes.kanban.git.status'
+  repo: KanbanGitRepository
+}
+
+export interface KanbanGitDiffResponse {
+  board: string
+  diff: string
+  object: 'hermes.kanban.git.diff'
+  path: string
+  repo: KanbanGitRepository
+}
+
+export interface KanbanGitCommitPushPayload {
+  message: string
+  paths?: string[]
+  repo_id?: null | string
+}
+
+export interface KanbanGitCommitPushResponse {
+  board: string
+  branch: string
+  commit: string
+  committed: boolean
+  object: 'hermes.kanban.git.commit_push'
+  paths: string[]
+  pushed: boolean
+  repo: KanbanGitRepository
+}
+
 export interface KanbanWorkflowEvidence {
   actor?: null | string
   created_at?: null | number

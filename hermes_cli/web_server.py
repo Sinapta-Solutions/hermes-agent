@@ -2284,6 +2284,106 @@ def list_kanban_tasks(slug: str):
         conn.close()
 
 
+def _kanban_git_repositories(slug: str) -> List[Dict[str, Any]]:
+    from hermes_cli import kanban_git
+
+    meta = _read_board_meta(slug)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Kanban board not found: {slug}")
+
+    repos: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_repo(path: Any, *, label: str, source: str, task_id: Optional[str] = None) -> None:
+        if not path:
+            return
+        payload = kanban_git.repository_payload(str(path), label=label, source=source, task_id=task_id)
+        if not payload or payload["id"] in seen:
+            return
+        seen.add(payload["id"])
+        repos.append(payload)
+
+    add_repo(meta.get("default_workdir"), label=f"{meta.get('name') or slug} · repo", source="board")
+
+    conn = _connect_kanban_board(slug)
+    try:
+        rows = conn.execute(
+            "SELECT id, title, workspace_path FROM tasks "
+            "WHERE status != 'archived' AND workspace_path IS NOT NULL AND TRIM(workspace_path) != '' "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+        for row in rows:
+            add_repo(
+                row["workspace_path"],
+                label=f"Card: {row['title']}",
+                source="task",
+                task_id=row["id"],
+            )
+    finally:
+        conn.close()
+
+    return repos
+
+
+def _kanban_git_repository(slug: str, repo_id: Optional[str]) -> Dict[str, Any]:
+    repos = _kanban_git_repositories(slug)
+    if not repos:
+        raise HTTPException(status_code=404, detail="No Git repositories found for this Kanban board")
+    if not repo_id:
+        return repos[0]
+    for repo in repos:
+        if repo["id"] == repo_id:
+            return repo
+    raise HTTPException(status_code=404, detail="Git repository not found for this Kanban board")
+
+
+@app.get("/api/kanban/boards/{slug}/git/repos")
+def list_kanban_git_repositories(slug: str):
+    repos = _kanban_git_repositories(slug)
+    return {"object": "hermes.kanban.git.repos", "board": _safe_board_slug(slug), "repos": repos}
+
+
+@app.get("/api/kanban/boards/{slug}/git/status")
+def get_kanban_git_status(slug: str, repo_id: Optional[str] = None):
+    from hermes_cli import kanban_git
+
+    repo = _kanban_git_repository(slug, repo_id)
+    files = kanban_git.git_status(Path(repo["path"]))
+    return {"object": "hermes.kanban.git.status", "board": _safe_board_slug(slug), "repo": repo, "files": files}
+
+
+@app.get("/api/kanban/boards/{slug}/git/diff")
+def get_kanban_git_diff(slug: str, path: str, repo_id: Optional[str] = None):
+    from hermes_cli import kanban_git
+
+    repo = _kanban_git_repository(slug, repo_id)
+    diff = kanban_git.git_diff(Path(repo["path"]), path)
+    safe_path = kanban_git.safe_git_pathspec(path)
+    return {"object": "hermes.kanban.git.diff", "board": _safe_board_slug(slug), "repo": repo, "path": safe_path, "diff": diff}
+
+
+@app.post("/api/kanban/boards/{slug}/git/commit-push")
+async def commit_push_kanban_git_changes(slug: str, request: Request):
+    from hermes_cli import kanban_git
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid Git commit payload")
+
+    repo = _kanban_git_repository(slug, str(body.get("repo_id") or "").strip() or None)
+    result = kanban_git.commit_and_push(
+        Path(repo["path"]),
+        message=str(body.get("message") or ""),
+        paths=body.get("paths"),
+    )
+    result["board"] = _safe_board_slug(slug)
+    result["repo"] = repo
+    return result
+
+
 @app.post("/api/kanban/boards/{slug}/tasks")
 async def create_kanban_task(slug: str, request: Request):
     try:

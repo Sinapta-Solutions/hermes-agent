@@ -49,6 +49,7 @@ import { notify, notifyError } from '@/store/notifications'
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
 import { buildKanbanColumnView, getKanbanBoardDensity, nextKeyboardTaskId } from './board-density'
+import { GitChangesPanel } from './git-changes-panel'
 import { groupKanbanRunTranscript, isKanbanTaskLive } from './runs'
 import {
   canUseRawKanbanStatusDrop,
@@ -921,6 +922,7 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                 )
               })}
             </div>
+            <GitChangesPanel boardSlug={selectedBoard.slug} />
           </div>
         )}
       </main>
