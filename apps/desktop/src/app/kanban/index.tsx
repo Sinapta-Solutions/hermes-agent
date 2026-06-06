@@ -888,15 +888,12 @@ export function KanbanView({ setStatusbarItemGroup }: KanbanViewProps) {
                           </div>
                         )}
                         <div
-                          className={cn(
-                            'flex flex-col gap-2 overflow-y-auto overscroll-contain pr-1',
-                            columnView.compactCards ? 'max-h-[calc(5*6rem+4*0.5rem)]' : 'max-h-[calc(5*8rem+4*0.5rem)]'
-                          )}
+                          className="flex max-h-[calc(5*8rem+4*0.5rem)] flex-col gap-2 overflow-y-auto overscroll-contain pr-1"
+                          data-kanban-column-card-list="true"
                         >
                           {columnView.visibleTasks.map(task => (
                             <TaskCard
                               active={selectedTask?.id === task.id}
-                              compact={columnView.compactCards}
                               dragging={draggingTaskId === task.id}
                               key={task.id}
                               nowSeconds={nowSeconds}
@@ -2153,7 +2150,6 @@ function WorkflowRoutePanel({
 
 function TaskCard({
   active,
-  compact,
   dragging,
   nowSeconds,
   onDragEnd,
@@ -2163,7 +2159,6 @@ function TaskCard({
   task
 }: {
   active: boolean
-  compact: boolean
   dragging: boolean
   nowSeconds: number
   onDragEnd: () => void
@@ -2181,8 +2176,8 @@ function TaskCard({
   return (
     <div
       className={cn(
-        'rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-left shadow-sm transition hover:border-(--ui-accent) hover:bg-(--ui-control-hover-background)',
-        compact ? 'h-24 overflow-hidden p-2' : 'h-32 overflow-hidden p-3',
+        'shrink-0 rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-left shadow-sm transition hover:border-(--ui-accent) hover:bg-(--ui-control-hover-background)',
+        'h-32 overflow-hidden p-3',
         active && 'border-(--ui-accent) ring-1 ring-(--ui-accent)',
         dragging && 'opacity-55 ring-1 ring-(--ui-accent)'
       )}
@@ -2210,7 +2205,7 @@ function TaskCard({
       tabIndex={0}
     >
       <div className="line-clamp-2 text-sm font-medium text-(--ui-text-primary)">{task.title}</div>
-      {!compact && task.body && (
+      {task.body && (
         <div className="mt-2 line-clamp-3 text-xs leading-relaxed text-(--ui-text-tertiary)">{task.body}</div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[0.68rem] text-(--ui-text-tertiary)">
