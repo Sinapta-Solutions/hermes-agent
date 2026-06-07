@@ -396,15 +396,35 @@ class SessionDB:
     # Attempt a PASSIVE WAL checkpoint every N successful writes.
     _CHECKPOINT_EVERY_N_WRITES = 50
 
-    def __init__(self, db_path: Path = None):
+    def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or DEFAULT_DB_PATH
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = read_only
 
         self._lock = threading.Lock()
         self._write_count = 0
         self._fts_enabled = False
         self._fts_unavailable_warned = False
         try:
+            if read_only:
+                # Read-only attach for cross-profile aggregation: SELECT-only,
+                # so we skip schema init entirely (no DDL, no FTS probe, no
+                # column reconcile). Crucially this takes NO write lock, so
+                # polling another profile's live DB on every sidebar refresh
+                # never contends with that profile's running backend. The DB
+                # must already exist + be initialised (callers guard on
+                # db_path.exists()); a SELECT against an empty file raises and
+                # the caller degrades per-profile.
+                self._conn = sqlite3.connect(
+                    f"file:{self.db_path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False,
+                    timeout=1.0,
+                    isolation_level=None,
+                )
+                self._conn.row_factory = sqlite3.Row
+                return
+
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(
                 str(self.db_path),
                 check_same_thread=False,
@@ -595,17 +615,27 @@ class SessionDB:
         )
 
     def _try_wal_checkpoint(self) -> None:
-        """Best-effort PASSIVE WAL checkpoint.  Never blocks, never raises.
+        """Best-effort TRUNCATE WAL checkpoint.  Never raises.
 
-        Flushes committed WAL frames back into the main DB file for any
-        frames that no other connection currently needs.  Keeps the WAL
-        from growing unbounded when many processes hold persistent
+        Flushes committed WAL frames back into the main DB file and
+        truncates the WAL file to zero bytes.  Keeps the WAL from
+        growing unbounded when many processes hold persistent
         connections.
+
+        PASSIVE checkpoint was previously used here, but it never
+        truncates the WAL file — the file stays at its high-water
+        mark until an explicit TRUNCATE is called (which only
+        happened inside the infrequent vacuum()).
+
+        TRUNCATE may block writers briefly while checkpointing, but
+        _try_wal_checkpoint is called off the hot path (every 50
+        writes) and already runs under ``self._lock``, so the
+        additional hold time is negligible.
         """
         try:
             with self._lock:
                 result = self._conn.execute(
-                    "PRAGMA wal_checkpoint(PASSIVE)"
+                    "PRAGMA wal_checkpoint(TRUNCATE)"
                 ).fetchone()
                 if result and result[1] > 0:
                     logger.debug(
@@ -618,13 +648,13 @@ class SessionDB:
     def close(self):
         """Close the database connection.
 
-        Attempts a PASSIVE WAL checkpoint first so that exiting processes
-        help keep the WAL file from growing unbounded.
+        Attempts a TRUNCATE WAL checkpoint first so that exiting processes
+        help shrink the WAL file.
         """
         with self._lock:
             if self._conn:
                 try:
-                    self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
                     pass
                 self._conn.close()
@@ -1104,6 +1134,24 @@ class SessionDB:
             return None
         return row["holder"] if isinstance(row, sqlite3.Row) else row[0]
 
+    def update_session_meta(
+        self,
+        session_id: str,
+        model_config_json: str,
+        model: Optional[str] = None,
+    ) -> None:
+        """Update model_config and optionally model for an existing session.
+
+        Uses COALESCE so that passing model=None leaves the stored model
+        column unchanged.  Routes through _execute_write for the standard
+        BEGIN IMMEDIATE + jitter-retry + lock guarantee.
+        """
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET model_config = ?, model = COALESCE(?, model) WHERE id = ?",
+                (model_config_json, model, session_id),
+            )
+        self._execute_write(_do)
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
@@ -2789,9 +2837,10 @@ class SessionDB:
         """Sanitize user input for safe use in FTS5 MATCH queries.
 
         FTS5 has its own query syntax where characters like ``"``, ``(``, ``)``,
-        ``+``, ``*``, ``{``, ``}`` and bare boolean operators (``AND``, ``OR``,
-        ``NOT``) have special meaning.  Passing raw user input directly to
-        MATCH can cause ``sqlite3.OperationalError``.
+        ``+``, ``*``, ``{``, ``}``, the column-filter operator ``:`` and bare
+        boolean operators (``AND``, ``OR``, ``NOT``) have special meaning.
+        Passing raw user input directly to MATCH can cause
+        ``sqlite3.OperationalError``.
 
         Strategy:
         - Preserve properly paired quoted phrases (``"exact phrase"``)
@@ -2810,8 +2859,12 @@ class SessionDB:
 
         sanitized = re.sub(r'"[^"]*"', _preserve_quoted, query)
 
-        # Step 2: Strip remaining (unmatched) FTS5-special characters
-        sanitized = re.sub(r'[+{}()\"^]', " ", sanitized)
+        # Step 2: Strip remaining (unmatched) FTS5-special characters.  ``:`` is
+        # FTS5's column-filter operator (``col:term``); since the FTS table has a
+        # single ``content`` column, an unquoted colon query like ``TODO: fix``
+        # parses as ``column:term`` and raises "no such column" — swallowed at
+        # the execute site into zero results.  Strip it like the others.
+        sanitized = re.sub(r'[+{}():\"^]', " ", sanitized)
 
         # Step 3: Collapse repeated * (e.g. "***") into a single one,
         # and remove leading * (prefix-only needs at least one char before *)
@@ -3274,13 +3327,19 @@ class SessionDB:
         archived_only: bool = False,
         include_children: bool = True,
         project_compression_tips: bool = False,
+        exclude_children: bool = False,
     ) -> int:
         """Count sessions, optionally filtered by source.
 
         Defaults to raw session rows for stats/admin callers. Desktop history
         callers can pass ``include_children=False`` and
         ``project_compression_tips=True`` to match ``list_sessions_rich``.
+        ``exclude_children=True`` is kept as an upstream alias for
+        ``include_children=False``.
         """
+        if exclude_children:
+            include_children = False
+
         if project_compression_tips and not include_children:
             return len(
                 self.list_sessions_rich(
@@ -3298,53 +3357,22 @@ class SessionDB:
         params = []
 
         if not include_children:
-            # Keep top-level conversations and explicit branch children visible,
-            # matching list_sessions_rich(). Hide delegate/compression children
-            # unless projected through their root.
+            # Mirror list_sessions_rich's child-exclusion clause: roots plus
+            # explicit branch children. Hide delegate/compression children
+            # unless projected through their root by project_compression_tips.
             where_clauses.append(
-                """(s.parent_session_id IS NULL OR EXISTS (
-                    SELECT 1 FROM sessions parent
-                    WHERE parent.id = s.parent_session_id
-                      AND parent.end_reason = 'branched'
-                ))"""
+                "(s.parent_session_id IS NULL"
+                " OR EXISTS (SELECT 1 FROM sessions p"
+                "            WHERE p.id = s.parent_session_id"
+                "            AND p.end_reason = 'branched'"
+                "            AND s.started_at >= p.ended_at))"
             )
         if source:
             where_clauses.append("s.source = ?")
             params.append(source)
         if min_message_count > 0:
-            if project_compression_tips and not include_children:
-                where_clauses.append(
-                    """(
-                    s.message_count >= ?
-                    OR (
-                        s.end_reason = 'compression'
-                        AND EXISTS (
-                            WITH RECURSIVE compression_descendants(cur_id) AS (
-                                SELECT child.id
-                                FROM sessions child
-                                WHERE child.parent_session_id = s.id
-                                  AND child.started_at >= s.ended_at
-                                UNION ALL
-                                SELECT child.id
-                                FROM compression_descendants d
-                                JOIN sessions parent ON parent.id = d.cur_id
-                                JOIN sessions child ON child.parent_session_id = d.cur_id
-                                WHERE parent.end_reason = 'compression'
-                                  AND child.started_at >= parent.ended_at
-                            )
-                            SELECT 1
-                            FROM compression_descendants d
-                            JOIN sessions ds ON ds.id = d.cur_id
-                            WHERE ds.message_count >= ?
-                            LIMIT 1
-                        )
-                    )
-                    )"""
-                )
-                params.extend([min_message_count, min_message_count])
-            else:
-                where_clauses.append("s.message_count >= ?")
-                params.append(min_message_count)
+            where_clauses.append("s.message_count >= ?")
+            params.append(min_message_count)
         if archived_only:
             where_clauses.append("s.archived = 1")
         elif not include_archived:

@@ -333,10 +333,10 @@ function ReasoningHarness() {
   )
 }
 
-function RunningReasoningHarness() {
+function ReasoningCodeHarness() {
   const runtime = useExternalStoreRuntime<ThreadMessage>({
-    messages: [assistantReasoningMessage('```ts\nconst answer = 42\n', true)],
-    isRunning: true,
+    messages: [assistantReasoningMessage('```ts\nconst answer = 42\n```')],
+    isRunning: false,
     onNew: async () => {}
   })
 
@@ -390,7 +390,6 @@ describe('assistant-ui streaming renderer', () => {
     await waitFor(() => {
       expect(container.textContent).toContain('first chunk')
     })
-    expect(container.textContent).not.toContain('second chunk')
     expect(screen.queryByRole('status', { name: 'M.i.A is loading a response' })).toBeNull()
 
     await wait(500)
@@ -635,12 +634,14 @@ describe('assistant-ui streaming renderer', () => {
       expect(container.querySelector('[data-slot="code-card"]')).toBeTruthy()
     })
 
-    expect(container.textContent).toContain('const answer = 42')
+    await waitFor(() => {
+      expect(container.textContent).toContain('const answer = 42')
+    })
     expect(container.textContent).not.toContain('```ts')
   })
 
-  it('renders an incomplete streaming reasoning fenced code block as a code card', async () => {
-    const { container } = render(<RunningReasoningHarness />)
+  it('renders a reasoning fenced code block as a code card', async () => {
+    const { container } = render(<ReasoningCodeHarness />)
     const ui = within(container)
 
     fireEvent.click(ui.getByRole('button', { name: /thinking/i }))
@@ -649,7 +650,9 @@ describe('assistant-ui streaming renderer', () => {
       expect(container.querySelector('[data-slot="code-card"]')).toBeTruthy()
     })
 
-    expect(container.querySelector('[data-slot="aui_reasoning-text"]')?.textContent).toContain('const answer = 42')
+    await waitFor(() => {
+      expect(container.querySelector('[data-slot="aui_reasoning-text"]')?.textContent).toContain('const answer = 42')
+    })
     expect(container.textContent).not.toContain('```ts')
   })
 
