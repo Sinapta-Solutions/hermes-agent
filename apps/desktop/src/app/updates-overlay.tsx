@@ -184,12 +184,10 @@ function IdleView({
         <BrandMark className="size-16" />
 
         <DialogTitle className="text-center text-xl">
-          {status.source === 'mia-installer' ? 'M.i.A Hermes update ready' : u.availableTitle}
+          {status.source === 'mia-installer' ? u.miaInstallerTitle : u.availableTitle}
         </DialogTitle>
         <DialogDescription className="text-center text-sm">
-          {status.source === 'mia-installer'
-            ? 'A prepared installer is ready. Click update to close M.i.A Hermes and start the installer.'
-            : u.availableBody}
+          {status.source === 'mia-installer' ? u.miaInstallerBody : u.availableBody}
         </DialogDescription>
       </div>
 
@@ -211,7 +209,7 @@ function IdleView({
 
       <div className="grid gap-2">
         <Button className="font-semibold" onClick={onInstall} size="lg">
-          {status.source === 'mia-installer' ? 'Install update' : u.updateNow}
+          {status.source === 'mia-installer' ? u.miaInstallerAction : u.updateNow}
         </Button>
         <Button className="font-medium" onClick={onLater} type="button" variant="text">
           {u.maybeLater}

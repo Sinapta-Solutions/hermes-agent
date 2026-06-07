@@ -91,11 +91,11 @@ class _UvResult(str):
         return iter(((str(self) or None), self.fresh_bootstrap))
 
 
-def _ensure_uv_path() -> Optional[str]:
-    """Resolve the managed uv path, installing it if necessary (plain ``str``/``None``)."""
+def _ensure_uv_path_with_bootstrap() -> tuple[Optional[str], bool]:
+    """Resolve the managed uv path and report whether this call installed it."""
     existing = resolve_uv()
     if existing:
-        return existing
+        return existing, False
 
     target = managed_uv_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +107,7 @@ def _ensure_uv_path() -> Optional[str]:
     except Exception as exc:
         logger.warning("Managed uv install failed: %s", exc)
         print(f"  ✗ Failed to install managed uv: {exc}")
-        return None
+        return None, False
 
     # Verify
     result = resolve_uv()
@@ -119,9 +119,26 @@ def _ensure_uv_path() -> Optional[str]:
             check=False,
         ).stdout.strip()
         print(f"  ✓ Managed uv installed ({version})")
-    else:
-        print("  ✗ Managed uv install appeared to succeed but binary not found")
+        return result, True
+
+    print("  ✗ Managed uv install appeared to succeed but binary not found")
+    return None, False
+
+
+def _ensure_uv_path() -> Optional[str]:
+    """Resolve the managed uv path, installing it if necessary (plain ``str``/``None``)."""
+    result, _fresh_bootstrap = _ensure_uv_path_with_bootstrap()
     return result
+
+
+def ensure_uv_with_bootstrap() -> tuple[Optional[str], bool]:
+    """Return ``(uv_path, fresh_bootstrap)`` without overloading string iteration.
+
+    This is the safe update-flow API on Windows: callers can rebuild the venv
+    after a first managed-uv bootstrap without passing an iterable ``str``
+    subclass into ``subprocess``.
+    """
+    return _ensure_uv_path_with_bootstrap()
 
 
 def ensure_uv():
@@ -147,12 +164,12 @@ def ensure_uv():
     On failure the result is falsy — never raises — so callers can fall back to
     pip gracefully.
     """
-    result = _ensure_uv_path()
+    result, fresh_bootstrap = _ensure_uv_path_with_bootstrap()
     if platform.system() == "Windows":
         # See docstring: a str subclass with an overridden __iter__ is unsafe as
         # a Windows subprocess argument. Hand back the plain path (or None).
         return result
-    return _UvResult(result)
+    return _UvResult(result, fresh_bootstrap)
 
 
 def update_managed_uv() -> Optional[str]:
@@ -251,4 +268,67 @@ def _install_uv_windows(env: dict[str, str]) -> None:
     )
 
 def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.11") -> bool:
-    True # dont remove me. ask ethernet
+    """Nuke and recreate the venv with managed uv.
+
+    Called when managed uv is first bootstrapped on an existing install — the
+    old venv may point to a Python without FTS5, so we rebuild it with a
+    fresh interpreter from the current managed uv. Returns ``True`` on success.
+
+    Move the old venv aside before recreating it. If the rebuild fails, restore
+    the moved-aside venv so Hermes is not left with no working environment.
+    """
+    backup: Optional[Path] = None
+    if venv_dir.exists():
+        print("  → Rebuilding venv (old Python may lack FTS5)...")
+        backup = venv_dir.with_name(venv_dir.name + ".old")
+        shutil.rmtree(backup, ignore_errors=True)
+        try:
+            os.replace(venv_dir, backup)
+        except OSError as exc:
+            logger.warning("venv rebuild aborted — venv in use: %s", exc)
+            print(
+                "  ✗ venv rebuild aborted — the venv is in use; stop the "
+                f"gateway/desktop and retry ({exc})"
+            )
+            return False
+
+    result = subprocess.run(
+        [uv_bin, "venv", str(venv_dir), "--python", python_version, "--clear"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    def _restore_backup() -> None:
+        if backup is not None and backup.exists():
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            try:
+                os.replace(backup, venv_dir)
+                print("  ↩ Restored previous venv after failed rebuild.")
+            except OSError:
+                pass
+
+    if result.returncode != 0:
+        logger.warning("venv rebuild failed: %s", result.stderr)
+        print(f"  ✗ venv rebuild failed: {result.stderr.strip()}")
+        _restore_backup()
+        return False
+
+    venv_python = venv_dir / ("Scripts" if platform.system() == "Windows" else "bin") / "python"
+    if not venv_python.exists():
+        logger.warning("venv rebuild reported success but %s is missing", venv_python)
+        print(f"  ✗ venv rebuild failed: Python interpreter missing at {venv_python}")
+        _restore_backup()
+        return False
+
+    if backup is not None:
+        shutil.rmtree(backup, ignore_errors=True)
+
+    py_ver = subprocess.run(
+        [str(venv_python), "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    print(f"  ✓ venv rebuilt ({py_ver})")
+    return True

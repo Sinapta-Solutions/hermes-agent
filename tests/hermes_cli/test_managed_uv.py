@@ -51,7 +51,8 @@ class TestResolveUv:
 
     def test_existing_executable(self, tmp_path):
         _make_executable(tmp_path / "bin" / "uv")
-        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"):
             from hermes_cli.managed_uv import resolve_uv
             result = resolve_uv()
             assert result == str(tmp_path / "bin" / "uv")
@@ -74,13 +75,16 @@ class TestResolveUv:
 class TestEnsureUv:
     def test_already_installed_no_bootstrap(self, tmp_path):
         _make_executable(tmp_path / "bin" / "uv")
-        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"):
             from hermes_cli.managed_uv import ensure_uv
             path = ensure_uv()
             assert path == str(tmp_path / "bin" / "uv")
 
     def test_installs_if_missing(self, tmp_path):
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
+             patch("hermes_cli.managed_uv.subprocess.run", return_value=MagicMock(stdout="uv 0.1.2")), \
              patch("hermes_cli.managed_uv._install_uv") as mock_install:
             # Simulate the installer creating the binary
             def fake_install(target):
@@ -196,6 +200,63 @@ class TestEnsureUvWindowsSafe:
             assert ensure_uv() is None
 
 
+class TestEnsureUvWithBootstrap:
+    def test_reports_fresh_bootstrap_without_breaking_windows_subprocess_args(self, tmp_path):
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Windows"), \
+             patch("hermes_cli.managed_uv.subprocess.run", return_value=MagicMock(stdout="uv 0.1.2")), \
+             patch("hermes_cli.managed_uv._install_uv") as mock_install:
+            def fake_install(target):
+                _make_executable(target)
+
+            mock_install.side_effect = fake_install
+
+            from hermes_cli.managed_uv import ensure_uv, ensure_uv_with_bootstrap
+
+            uv_bin, fresh = ensure_uv_with_bootstrap()
+
+            assert uv_bin == str(tmp_path / "bin" / "uv.exe")
+            assert fresh is True
+            assert type(ensure_uv()) is str
+
+
+class TestRebuildVenv:
+    def test_rebuilds_existing_venv_with_atomic_backup(self, tmp_path):
+        venv = tmp_path / "venv"
+        (venv / "old.txt").parent.mkdir(parents=True)
+        (venv / "old.txt").write_text("old")
+
+        def fake_run(cmd, **_kwargs):
+            if cmd[:2] == ["uv", "venv"]:
+                python_path = venv / "bin" / "python"
+                python_path.parent.mkdir(parents=True, exist_ok=True)
+                python_path.write_text("python")
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0, stdout="Python 3.11.13")
+
+        with patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
+             patch("hermes_cli.managed_uv.subprocess.run", side_effect=fake_run) as mock_run:
+            from hermes_cli.managed_uv import rebuild_venv
+
+            assert rebuild_venv("uv", venv) is True
+
+        assert (venv / "bin" / "python").exists()
+        assert not (tmp_path / "venv.old").exists()
+        assert mock_run.call_args_list[0][0][0] == ["uv", "venv", str(venv), "--python", "3.11", "--clear"]
+
+    def test_restores_previous_venv_when_rebuild_fails(self, tmp_path):
+        venv = tmp_path / "venv"
+        (venv / "old.txt").parent.mkdir(parents=True)
+        (venv / "old.txt").write_text("old")
+
+        with patch("hermes_cli.managed_uv.subprocess.run", return_value=MagicMock(returncode=1, stderr="boom")):
+            from hermes_cli.managed_uv import rebuild_venv
+
+            assert rebuild_venv("uv", venv) is False
+
+        assert (venv / "old.txt").read_text() == "old"
+
+
 # ---------------------------------------------------------------------------
 # update_managed_uv
 # ---------------------------------------------------------------------------
@@ -209,6 +270,7 @@ class TestUpdateManagedUv:
     def test_self_update_success(self, tmp_path):
         _make_executable(tmp_path / "bin" / "uv")
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
              patch("hermes_cli.managed_uv.subprocess.run") as mock_run:
             # uv self update succeeds
             mock_run.return_value = MagicMock(returncode=0, stdout="uv 0.2.0")
@@ -222,6 +284,7 @@ class TestUpdateManagedUv:
     def test_self_update_failure_non_fatal(self, tmp_path):
         _make_executable(tmp_path / "bin" / "uv")
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
              patch("hermes_cli.managed_uv.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="nope")
             from hermes_cli.managed_uv import update_managed_uv
@@ -237,7 +300,8 @@ class TestUpdateManagedUv:
 class TestInstallUvInternals:
     def test_posix_sets_uv_unmanaged_install(self, tmp_path):
         target = tmp_path / "bin" / "uv"
-        with patch("hermes_cli.managed_uv._install_uv_posix") as mock_posix:
+        with patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
+             patch("hermes_cli.managed_uv._install_uv_posix") as mock_posix:
             from hermes_cli.managed_uv import _install_uv
             _install_uv(target)
             mock_posix.assert_called_once()

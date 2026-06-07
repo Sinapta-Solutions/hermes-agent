@@ -8146,12 +8146,15 @@ def _update_via_zip(args):
     # individually so update does not silently strip working capabilities.
     print("→ Updating Python dependencies...")
 
-    from hermes_cli.managed_uv import ensure_uv, update_managed_uv
+    from hermes_cli.managed_uv import ensure_uv_with_bootstrap, rebuild_venv, update_managed_uv
 
     # Keep managed uv current — runs `uv self update` if we already have one.
     update_managed_uv()
 
-    uv_bin = ensure_uv()
+    uv_bin, fresh_bootstrap = ensure_uv_with_bootstrap()
+    if fresh_bootstrap and uv_bin:
+        if not rebuild_venv(uv_bin, PROJECT_ROOT / "venv"):
+            raise RuntimeError("venv rebuild failed; aborting update before dependency install")
 
     pip_cmd = [sys.executable, "-m", "pip"]
     if not uv_bin:
@@ -10673,12 +10676,15 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # breaks on this machine, keep base deps and reinstall the remaining extras
         # individually so update does not silently strip working capabilities.
         print("→ Updating Python dependencies...")
-        from hermes_cli.managed_uv import ensure_uv, update_managed_uv
+        from hermes_cli.managed_uv import ensure_uv_with_bootstrap, rebuild_venv, update_managed_uv
 
         # Keep managed uv current — runs `uv self update` if we already have one.
         update_managed_uv()
 
-        uv_bin = ensure_uv()
+        uv_bin, fresh_bootstrap = ensure_uv_with_bootstrap()
+        if fresh_bootstrap and uv_bin:
+            if not rebuild_venv(uv_bin, PROJECT_ROOT / "venv"):
+                raise RuntimeError("venv rebuild failed; aborting update before dependency install")
 
         pip_cmd = [sys.executable, "-m", "pip"]
         if not uv_bin:

@@ -930,6 +930,9 @@ export interface Translations {
     allSetTitle: string
     availableTitle: string
     availableBody: string
+    miaInstallerTitle: string
+    miaInstallerBody: string
+    miaInstallerAction: string
     updateNow: string
     maybeLater: string
     moreChanges: (count: number) => string

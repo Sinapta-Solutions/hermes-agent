@@ -1639,6 +1639,7 @@ async function applyUpdates(opts = {}) {
   try {
     const miaState = readMiaUpdateState()
     if (isMiaInstallerPending(miaState)) {
+      await releaseBackendLockForUpdate(resolveUpdateRoot())
       emitUpdateProgress({ stage: 'restart', message: 'Opening the prepared M.i.A Hermes installer…', percent: 100 })
       const child = spawn(miaState.installerPath, [], {
         detached: true,
