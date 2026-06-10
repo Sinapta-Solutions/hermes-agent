@@ -214,9 +214,11 @@ export function DesktopController() {
     closeOverlayToPreviousRoute,
     commandCenterInitialSection,
     commandCenterOpen,
+    cronOpen,
     currentView,
     openAgents,
     openCommandCenterSection,
+    profilesOpen,
     settingsOpen,
     toggleCommandCenter
   } = useOverlayRouting()

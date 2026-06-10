@@ -948,7 +948,8 @@ export interface Translations {
     miaInstallerAction: string
     availableTitleBackend: string
     availableBodyBackend: string
-    availableBodyNoChangelog: string    updateNow: string
+    availableBodyNoChangelog: string
+    updateNow: string
     maybeLater: string
     moreChanges: (count: number) => string
     manualTitle: string

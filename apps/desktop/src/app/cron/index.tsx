@@ -592,7 +592,7 @@ function CronJobDetail({
             <StatePill tone="muted">{deliveryDisplayLabel(deliver)}</StatePill>
           )}
         </div>
-        {hasName && prompt && <p className="mt-1 truncate text-xs text-muted-foreground">{truncate(prompt, 120)}</p>}
+        {!!job.name && prompt && <p className="mt-1 truncate text-xs text-muted-foreground">{truncate(prompt, 120)}</p>}
         <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[0.68rem] text-muted-foreground">
           <span className="inline-flex items-center gap-1 font-mono">
             <Clock className="size-3" />
@@ -612,19 +612,6 @@ function CronJobDetail({
           </p>
         )}
       </button>
-
-            {prompt && <p className="line-clamp-3 text-xs text-muted-foreground">{prompt}</p>}
-            {job.last_error && (
-              <p className="inline-flex items-start gap-1 text-[0.7rem] text-destructive">
-                <AlertTriangle className="mt-px size-3 shrink-0" />
-                <span className="line-clamp-2">{job.last_error}</span>
-              </p>
-            )}
-          </header>
-
-          <CronJobRuns c={c} jobId={job.id} onOpenSession={onOpenSession} />
-        </div>
-      </div>
     </div>
   )
 }

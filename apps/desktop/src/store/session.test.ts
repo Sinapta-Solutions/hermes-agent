@@ -4,7 +4,6 @@ import type { SessionInfo } from '@/types/hermes'
 
 import {
   $attentionSessionIds,
-  $attentionSessionIds,
   $workingSessionIds,
   getRecentlySettledSessionIds,
   mergeSessionPage,

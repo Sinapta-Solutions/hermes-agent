@@ -216,7 +216,7 @@ function IdleView({
         </DialogTitle>
         <DialogDescription className="text-center text-sm">
           {status.source === 'mia-installer' ? u.miaInstallerBody : body}
-        </DialogDescription>        </DialogDescription>
+        </DialogDescription>
       </div>
 
       <div className="grid gap-3 rounded-xl border border-border/70 bg-muted/20 px-4 py-3">
