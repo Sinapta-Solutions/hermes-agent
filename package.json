@@ -14,12 +14,21 @@
     "desktop:validate": "npm --workspace apps/desktop run validate:desktop",
     "desktop:validate:quick": "npm --workspace apps/desktop run validate:desktop:quick",
     "desktop:test:ui": "npm --workspace apps/desktop run test:ui",
+    "install:root": "npm install --workspaces=false",
+    "install:web": "npm install --workspace web",
+    "install:tui": "npm install --workspace ui-tui",
+    "install:desktop": "npm install --workspace apps/desktop",
+    "audit:root": "npm audit --workspaces=false",
+    "audit:web": "npm audit --workspace web",
+    "audit:tui": "npm audit --workspace ui-tui",
+    "audit:fix:root": "npm audit fix --workspaces=false",
+    "audit:fix:web": "npm audit fix --workspace web",
+    "audit:fix:tui": "npm audit fix --workspace ui-tui",
     "github:auth:status": "gh auth status",
     "github:pr:status": "gh pr status",
     "github:ci:list": "gh run list --limit 10",
     "github:ci:watch": "gh run watch",
-    "github:release:list": "gh release list --limit 10"
-  },
+    "github:release:list": "gh release list --limit 10"  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/NousResearch/Hermes-Agent.git"
