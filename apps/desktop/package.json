@@ -2,7 +2,7 @@
   "name": "hermes",
   "productName": "M.i.A Hermes",
   "private": true,
-  "version": "0.16.0",
+  "version": "0.16.1",
   "description": "Native desktop shell for M.i.A Hermes Agent.",
   "author": "Sinapta Solutions",
   "type": "module",
