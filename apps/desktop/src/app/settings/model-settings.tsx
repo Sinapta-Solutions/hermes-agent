@@ -155,6 +155,12 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
     setApiKeyDraft('')
   }, [selectedProvider])
 
+  // Reset selected model when provider changes so we don't apply a stale model
+  // that doesn't exist for the new provider.
+  useEffect(() => {
+    setSelectedModel('')
+  }, [selectedProvider])
+
   const auxDraftProviderModels = useMemo(
     () => providers.find(provider => provider.slug === auxDraft.provider)?.models ?? [],
     [auxDraft.provider, providers]

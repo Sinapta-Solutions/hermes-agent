@@ -24,7 +24,10 @@ export function ModelPickerOverlay({ gateway, onSelect }: ModelPickerOverlayProp
   const gatewayOpen = useStore($gatewayState) === 'open'
   const open = useStore($modelPickerOpen)
 
-  if (!gatewayOpen) {
+  // Render when gateway is NOT open (global model picker) OR when gateway is open
+  // but we want the picker instead of the menu panel. The status bar controls which
+  // one is shown by toggling $modelPickerOpen.
+  if (gatewayOpen) {
     return null
   }
 
