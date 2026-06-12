@@ -40,10 +40,13 @@
   "homepage": "https://github.com/NousResearch/Hermes-Agent#readme",
   "dependencies": {
     "@streamdown/math": "^1.0.2",
-    "agent-browser": "^0.26.0"
+    "agent-browser": "^0.26.0",
+    "assistant-stream": "0.3.21"
   },
   "overrides": {
-    "lodash": "4.18.1"
+    "lodash": "4.18.1",
+    "@assistant-ui/core": "0.1.17",
+    "assistant-stream": "0.3.21"
   },
   "engines": {
     "node": ">=20.0.0"

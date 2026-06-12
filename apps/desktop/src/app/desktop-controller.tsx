@@ -11,6 +11,7 @@ import { Pane, PaneMain } from '@/components/pane-shell'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { useSkinCommand } from '@/themes/use-skin-command'
 
+import { requestComposerFocus, requestComposerInsert } from './chat/composer/focus'
 import { formatRefValue } from '../components/assistant-ui/directive-text'
 import { getCronJobs, getSessionMessages, listAllProfileSessions, type SessionInfo, triggerCronJob } from '../hermes'
 import { preserveLocalAssistantErrors, toChatMessages } from '../lib/chat-messages'
@@ -50,9 +51,9 @@ import {
   $currentCwd,
   $freshDraftReady,
   $gatewayState,
+  $messagingSessions,
   $selectedStoredSessionId,
   $sessions,
-  $messagingSessions,
   $workingSessionIds,
   CRON_SECTION_LIMIT,
   getRecentlySettledSessionIds,
@@ -76,6 +77,7 @@ import {
   setSessionsTotal
 } from '../store/session'
 import { openUpdatesWindow, startUpdatePoller, stopUpdatePoller } from '../store/updates'
+import { isSecondaryWindow } from '../store/windows'
 
 import { ChatView } from './chat'
 import { useComposerActions } from './chat/hooks/use-composer-actions'
@@ -96,6 +98,9 @@ import { RightSidebarPane } from './right-sidebar'
 import { $terminalTakeover } from './right-sidebar/store'
 import { PersistentTerminal, TerminalSlot } from './right-sidebar/terminal/persistent'
 import { CRON_ROUTE, NEW_CHAT_ROUTE, routeSessionId, sessionRoute, SETTINGS_ROUTE } from './routes'
+import { SessionPickerOverlay } from './session-picker-overlay'
+import { SessionSwitcher } from './session-switcher'
+import { CommandPalette } from './command-palette'
 import { useContextSuggestions } from './session/hooks/use-context-suggestions'
 import { useCwdActions } from './session/hooks/use-cwd-actions'
 import { useHermesConfig } from './session/hooks/use-hermes-config'
@@ -147,7 +152,9 @@ const MESSAGING_EXCLUDED_SOURCES = ['cron', ...LOCAL_SESSION_SOURCE_IDS]
 // Cheap signature compare so the poll only swaps the atom (and re-renders the
 // sidebar) when the visible cron rows actually changed.
 function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
-  if (a.length !== b.length) {return false}
+  if (a.length !== b.length) {
+    return false
+  }
 
   return a.every((session, i) => session.id === b[i]?.id && session.title === b[i]?.title)
 }
@@ -223,7 +230,7 @@ export function DesktopController() {
     toggleCommandCenter
   } = useOverlayRouting()
 
-  const terminalTakeoverActive = chatOpen && terminalTakeover
+  const terminalSidebarOpen = chatOpen && terminalTakeover
 
   const titlebarToolGroups = useGroupRegistry<TitlebarTool>()
   const statusbarItemGroups = useGroupRegistry<StatusbarItem>()
@@ -261,6 +268,31 @@ export function DesktopController() {
       unsubscribe?.()
       stopUpdatePoller()
     }
+  }, [])
+
+  // hermes:// deep links (e.g. a docs "Send to App" button for an automation blueprint).
+  // Build the equivalent /blueprint slash command from the payload and drop
+  // it into the composer — the user reviews/edits, then sends; the agent (or
+  // the shared command handler) creates the job. Signal readiness so a link
+  // that arrived during boot is flushed exactly once.
+  useEffect(() => {
+    const unsubscribe = window.hermesDesktop?.onDeepLink?.((payload) => {
+      if (!payload || payload.kind !== 'blueprint' || !payload.name) {
+        return
+      }
+      const slots = Object.entries(payload.params || {})
+        .map(([k, v]) => {
+          const sval = /\s/.test(v) ? `"${v.replace(/"/g, '\\"')}"` : v
+          return `${k}=${sval}`
+        })
+        .join(' ')
+      const command = `/blueprint ${payload.name}${slots ? ' ' + slots : ''}`
+      requestComposerInsert(command, { mode: 'block', target: 'main' })
+      requestComposerFocus('main')
+    })
+    // Tell the main process the renderer is ready to receive deep links.
+    void window.hermesDesktop?.signalDeepLinkReady?.()
+    return () => unsubscribe?.()
   }, [])
 
   useEffect(() => {
@@ -420,7 +452,10 @@ export function DesktopController() {
 
     const keep = sessionsToKeep(key)
 
-    setSessions(prev => [...prev.filter(s => !inKey(s)), ...mergeSessionPage(prev.filter(inKey), result.sessions, keep)])
+    setSessions(prev => [
+      ...prev.filter(s => !inKey(s)),
+      ...mergeSessionPage(prev.filter(inKey), result.sessions, keep)
+    ])
 
     const total = result.profile_totals?.[key] ?? result.total ?? result.sessions.length
     setSessionProfileTotals(prev => ({ ...prev, [key]: Math.max(total, result.sessions.length) }))
@@ -681,19 +716,20 @@ export function DesktopController() {
     submitText,
     transcribeVoiceAudio
   } = usePromptActions({
-      activeSessionId,
-      activeSessionIdRef,
-      branchCurrentSession: branchInNewChat,
-      busyRef,
-      createBackendSessionForSend,
-      handleSkinCommand,
-      refreshSessions,
-      requestGateway,
-      selectedStoredSessionIdRef,
-      startFreshSessionDraft,
-      sttEnabled,
-      updateSessionState
-    })
+    activeSessionId,
+    activeSessionIdRef,
+    branchCurrentSession: branchInNewChat,
+    busyRef,
+    createBackendSessionForSend,
+    handleSkinCommand,
+    refreshSessions,
+    requestGateway,
+    resumeStoredSession: resumeSession,
+    selectedStoredSessionIdRef,
+    startFreshSessionDraft,
+    sttEnabled,
+    updateSessionState
+  })
 
   useGatewayBoot({
     handleGatewayEvent: handleDesktopGatewayEvent,
@@ -719,10 +755,14 @@ export function DesktopController() {
   // in the background (advancing next-run/state and creating runs), so poll the
   // job list on an interval (and on tab re-focus) while connected.
   useEffect(() => {
-    if (gatewayState !== 'open') {return}
+    if (gatewayState !== 'open') {
+      return
+    }
 
     const tick = () => {
-      if (document.visibilityState === 'visible') {void refreshCronJobs()}
+      if (document.visibilityState === 'visible') {
+        void refreshCronJobs()
+      }
     }
 
     const intervalId = window.setInterval(tick, CRON_POLL_INTERVAL_MS)
@@ -733,6 +773,13 @@ export function DesktopController() {
       document.removeEventListener('visibilitychange', tick)
     }
   }, [gatewayState, refreshCronJobs])
+
+  useEffect(() => {
+    if (gatewayState === 'open' && !activeSessionId && freshDraftReady) {
+      void refreshCurrentModel()
+      void refreshHermesConfig()
+    }
+  }, [activeSessionId, freshDraftReady, gatewayState, refreshCurrentModel, refreshHermesConfig])
 
   useRouteResume({
     activeSessionId,
@@ -752,6 +799,7 @@ export function DesktopController() {
 
   const { leftStatusbarItems, statusbarItems } = useStatusbarItems({
     agentsOpen,
+    chatOpen,
     commandCenterOpen,
     extraLeftItems: statusbarItemGroups.flat.left,
     extraRightItems: statusbarItemGroups.flat.right,
@@ -790,26 +838,35 @@ export function DesktopController() {
     />
   )
 
+  // One PTY-backed terminal mounted forever; <TerminalSlot /> placeholders decide
+  // where it shows. Lives in main's stacking context (not the root overlay layer)
+  // so pane resize handles still paint above it. Toggling never rebuilds the shell.
+  const mainOverlays = (
+    <PersistentTerminal cwd={currentCwd} onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
+  )
+
   const overlays = (
     <>
-      <DesktopInstallOverlay />
-      {/* One PTY-backed terminal mounted forever; <TerminalSlot /> placeholders
-          decide where it shows. Toggling fullscreen never rebuilds the shell. */}
-      <PersistentTerminal cwd={currentCwd} onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
-      <DesktopOnboardingOverlay
-        enabled={gatewayState === 'open'}
-        onCompleted={() => {
-          void refreshHermesConfig()
-          void refreshCurrentModel()
-          void queryClient.invalidateQueries({ queryKey: ['model-options'] })
-        }}
-        requestGateway={requestGateway}
-      />
+      {!isSecondaryWindow() && <DesktopInstallOverlay />}
+      {!isSecondaryWindow() && (
+        <DesktopOnboardingOverlay
+          enabled={gatewayState === 'open'}
+          onCompleted={() => {
+            void refreshHermesConfig()
+            void refreshCurrentModel()
+            void queryClient.invalidateQueries({ queryKey: ['model-options'] })
+          }}
+          requestGateway={requestGateway}
+        />
+      )}
       <ModelPickerOverlay gateway={gatewayRef.current || undefined} onSelect={selectModel} />
+      <SessionPickerOverlay onResume={resumeSession} />
       <ModelVisibilityOverlay gateway={gatewayRef.current || undefined} onOpenProviders={openProviderSettings} />
       <UpdatesOverlay />
       <GatewayConnectingOverlay />
       <BootFailureOverlay />
+      <CommandPalette />
+      <SessionSwitcher />
 
       {settingsOpen && (
         <Suspense fallback={null}>
@@ -897,12 +954,6 @@ export function DesktopController() {
     />
   )
 
-  const takeoverTerminalView = (
-    <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--ui-chat-surface-background) pt-(--titlebar-height)">
-      <TerminalSlot />
-    </div>
-  )
-
   // Flipped layout mirrors the default: sessions sidebar → right, file
   // browser + preview rail → left. Same panes, swapped sides.
   const sidebarSide = panesFlipped ? 'right' : 'left'
@@ -947,35 +998,57 @@ export function DesktopController() {
     </Pane>
   )
 
+  const terminalPane = (
+    <Pane
+      defaultOpen
+      disabled={!terminalSidebarOpen}
+      divider
+      id="terminal-sidebar"
+      key="terminal-sidebar"
+      maxWidth="80vw"
+      minWidth="22vw"
+      resizable
+      side={railSide}
+      width="42vw"
+    >
+      <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--ui-editor-surface-background) pt-(--titlebar-height)">
+        <TerminalSlot />
+      </div>
+    </Pane>
+  )
+
   return (
     <AppShell
       commandCenterOpen={commandCenterOpen}
       leftStatusbarItems={leftStatusbarItems}
       leftTitlebarTools={titlebarToolGroups.flat.left}
-      onOpenSearch={() => openCommandCenterSection('sessions')}
+      mainOverlays={mainOverlays}
       onOpenSettings={openSettings}
       overlays={overlays}
+      previewPaneOpen={chatOpen && Boolean(previewTarget || filePreviewTarget)}
       statusbarItems={statusbarItems}
+      terminalPaneOpen={terminalSidebarOpen}
       titlebarTools={titlebarToolGroups.flat.right}
     >
-      <Pane
-        disabled={terminalTakeoverActive}
-        forceCollapsed={narrowViewport}
-        hoverReveal
-        id="chat-sidebar"
-        maxWidth={SIDEBAR_MAX_WIDTH}
-        minWidth={SIDEBAR_DEFAULT_WIDTH}
-        onOverlayActiveChange={setSidebarOverlayMounted}
-        resizable
-        side="left"
-        width={`${SIDEBAR_DEFAULT_WIDTH}px`}
-      >
-        {sidebar}
-      </Pane>
+      {!isSecondaryWindow() && (
+        <Pane
+          forceCollapsed={narrowViewport}
+          hoverReveal
+          id="chat-sidebar"
+          maxWidth={SIDEBAR_MAX_WIDTH}
+          minWidth={SIDEBAR_DEFAULT_WIDTH}
+          onOverlayActiveChange={setSidebarOverlayMounted}
+          resizable
+          side={sidebarSide}
+          width={`${SIDEBAR_DEFAULT_WIDTH}px`}
+        >
+          {sidebar}
+        </Pane>
+      )}
       <PaneMain>
         <Routes>
-          <Route element={terminalTakeoverActive ? takeoverTerminalView : chatView} index />
-          <Route element={terminalTakeoverActive ? takeoverTerminalView : chatView} path=":sessionId" />
+          <Route element={chatView} index />
+          <Route element={chatView} path=":sessionId" />
           <Route
             element={
               <Suspense fallback={null}>
@@ -1061,35 +1134,9 @@ export function DesktopController() {
           <Route element={<Navigate replace to={NEW_CHAT_ROUTE} />} path="*" />
         </Routes>
       </PaneMain>
-      <Pane
-        disabled={!chatOpen || (!previewTarget && !filePreviewTarget)}
-        id="preview"
-        maxWidth={PREVIEW_RAIL_MAX_WIDTH}
-        minWidth={PREVIEW_RAIL_MIN_WIDTH}
-        resizable
-        side="right"
-        width={PREVIEW_RAIL_PANE_WIDTH}
-      >
-        {chatOpen ? (
-          <ChatPreviewRail onRestartServer={restartPreviewServer} setTitlebarToolGroup={setTitlebarToolGroup} />
-        ) : null}
-      </Pane>
-      <Pane
-        defaultOpen={false}
-        disabled={!chatOpen}
-        id="file-browser"
-        maxWidth={FILE_BROWSER_MAX_WIDTH}
-        minWidth={FILE_BROWSER_MIN_WIDTH}
-        resizable
-        side="right"
-        width={FILE_BROWSER_DEFAULT_WIDTH}
-      >
-        <RightSidebarPane
-          onActivateFile={composer.attachContextFilePath}
-          onActivateFolder={composer.attachContextFolderPath}
-          onChangeCwd={changeSessionCwd}
-        />
-      </Pane>
+      {panesFlipped ? fileBrowserPane : terminalPane}
+      {previewPane}
+      {panesFlipped ? terminalPane : fileBrowserPane}
     </AppShell>
   )
 }
