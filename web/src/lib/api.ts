@@ -60,14 +60,16 @@ export function getManagementProfile(): string {
 
 // Endpoint families that honor ?profile= on the backend (web_server.py
 // _profile_scope). Anything else — sessions, analytics, ops, pairing,
-// channels, cron (which has its own per-job profile params), profiles
-// themselves — is machine-global or self-scoped and must NOT be rewritten.
+// telegram onboarding, cron (which has its own per-job profile params),
+// profiles themselves — is machine-global or self-scoped and must NOT be
+// rewritten.
 const PROFILE_SCOPED_PREFIXES = [
   "/api/skills",
   "/api/tools/toolsets",
   "/api/config",
   "/api/env",
   "/api/mcp",
+  "/api/messaging/platforms",
   "/api/model/info",
   "/api/model/set",
   "/api/model/auxiliary",
@@ -497,7 +499,7 @@ export const api = {
   deleteCronJob: (id: string, profile = "default") =>
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${encodeURIComponent(id)}?profile=${encodeURIComponent(profile)}`, { method: "DELETE" }),
 
-  // Automation Blueprints — parameterized automation templates
+  // Automation Blueprints — parameterized automation blueprints
   getAutomationBlueprints: () =>
     fetchJSON<{ blueprints: AutomationBlueprint[] }>("/api/cron/blueprints"),
   instantiateAutomationBlueprint: (
