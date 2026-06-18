@@ -82,9 +82,14 @@ export interface Translations {
       remoteDescription: string
       retry: string
       repairInstall: string
+      rollbackUpdate: string
+      rollbackUnavailable: string
+      rollbackUnavailableMessage: string
+      rollbackFailed: string
       useLocalGateway: string
       openLogs: string
       repairHint: string
+      rollbackHint: string
       remoteSignInHint: string
       hideRecentLogs: string
       showRecentLogs: string
@@ -1038,6 +1043,7 @@ export interface Translations {
     availableBodyBackend: string
     availableBodyNoChangelog: string
     updateNow: string
+    rollbackAction: string
     maybeLater: string
     moreChanges: (count: number) => string
     manualTitle: string
@@ -1047,6 +1053,7 @@ export interface Translations {
     copied: string
     done: string
     applyingBody: string
+    rollbackApplyingBody: string
     applyingBodyBackend: string
     applyingClose: string
     errorTitle: string
@@ -1056,6 +1063,10 @@ export interface Translations {
       preparing: string
       pulling: string
       restarting: string
+      rollbackPreparing: string
+      rollingBack: string
+      rollbackUnavailable: string
+      rollbackFailed: string
       notAvailable: string
       failed: string
       noReturn: string

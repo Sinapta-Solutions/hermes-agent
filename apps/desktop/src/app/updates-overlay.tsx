@@ -27,6 +27,7 @@ import {
   checkBackendUpdates,
   checkUpdates,
   resetUpdateApplyState,
+  rollbackUpdates,
   setUpdateOverlayOpen,
   type UpdateApplyState
 } from '@/store/updates'
@@ -47,6 +48,7 @@ export function UpdatesOverlay() {
   const backendApply = useStore($backendUpdateApply)
 
   const isBackend = target === 'backend'
+  const [lastAction, setLastAction] = useState<'install' | 'rollback'>('install')
   const status = isBackend ? backendStatus : clientStatus
   const checking = isBackend ? backendChecking : clientChecking
   const apply = isBackend ? backendApply : clientApply
@@ -83,7 +85,14 @@ export function UpdatesOverlay() {
   }
 
   const handleInstall = () => {
+    setLastAction('install')
     void install()
+  }
+
+  const handleRollback = () => {
+    if (isBackend) return
+    setLastAction('rollback')
+    void rollbackUpdates()
   }
 
   return (
@@ -99,7 +108,11 @@ export function UpdatesOverlay() {
         )}
 
         {phase === 'error' && (
-          <ErrorView message={apply.message} onDismiss={() => handleClose(false)} onRetry={handleInstall} />
+          <ErrorView
+            message={apply.message}
+            onDismiss={() => handleClose(false)}
+            onRetry={lastAction === 'rollback' ? handleRollback : handleInstall}
+          />
         )}
 
         {phase === 'idle' && (
@@ -110,6 +123,7 @@ export function UpdatesOverlay() {
             onInstall={handleInstall}
             onLater={() => handleClose(false)}
             onRetryCheck={() => void check()}
+            onRollback={!isBackend && status?.rollback?.available ? handleRollback : undefined}
             status={status}
             target={target}
           />
@@ -126,6 +140,7 @@ function IdleView({
   onInstall,
   onLater,
   onRetryCheck,
+  onRollback,
   status,
   target
 }: {
@@ -135,6 +150,7 @@ function IdleView({
   onInstall: () => void
   onLater: () => void
   onRetryCheck: () => void
+  onRollback?: () => void
   status: DesktopUpdateStatus | null
   target: UpdateTarget
 }) {
@@ -189,6 +205,13 @@ function IdleView({
   if (behind === 0) {
     return (
       <CenteredStatus
+        action={
+          onRollback ? (
+            <Button onClick={onRollback} size="sm" variant="secondary">
+              {u.rollbackAction}
+            </Button>
+          ) : undefined
+        }
         body={target === 'backend' ? u.latestBodyBackend : u.latestBody}
         icon={<CheckCircle2 className="size-7 text-emerald-600 dark:text-emerald-400" />}
         title={u.allSetTitle}
@@ -239,6 +262,11 @@ function IdleView({
         <Button className="font-semibold" onClick={onInstall} size="lg">
           {status.source === 'mia-installer' ? u.miaInstallerAction : u.updateNow}
         </Button>
+        {onRollback ? (
+          <Button className="font-medium" onClick={onRollback} type="button" variant="secondary">
+            {u.rollbackAction}
+          </Button>
+        ) : null}
         <Button className="font-medium" onClick={onLater} type="button" variant="text">
           {u.maybeLater}
         </Button>
@@ -315,7 +343,7 @@ function ApplyingView({ apply, isBackend }: { apply: UpdateApplyState; isBackend
   const { t } = useI18n()
   const u = t.updates
   const label = u.stages[apply.stage as DesktopUpdateStage] ?? u.stages.idle
-  const body = isBackend ? u.applyingBodyBackend : u.applyingBody
+  const body = apply.stage === 'rollback' ? u.rollbackApplyingBody : isBackend ? u.applyingBodyBackend : u.applyingBody
 
   const percent =
     typeof apply.percent === 'number' && Number.isFinite(apply.percent)

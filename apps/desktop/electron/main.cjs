@@ -291,8 +291,12 @@ const BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
 const DESKTOP_CONNECTION_CONFIG_PATH = path.join(app.getPath('userData'), 'connection.json')
 const DESKTOP_UPDATE_CONFIG_PATH = path.join(app.getPath('userData'), 'updates.json')
 const MIA_UPDATE_STATE_PATH = path.join(HERMES_HOME, 'mia-hermes-update.json')
+const MIA_INSTALL_HISTORY_PATH = path.join(HERMES_HOME, 'mia-hermes-install-history.json')
+const MIA_UPDATE_HANDOFF_DIR = path.join(HERMES_HOME, 'tmp')
+const MIA_NSIS_HANDOFF_LOG_PATH = path.join(HERMES_HOME, 'logs', 'mia-nsis-update.log')
+
 // active-profile.json records which Hermes profile the desktop launches its
-// local backend as. When set, startHermes() passes `hermes --profile <name>
+// local backend as. When set, startHermes() passes `hermes --profile <name>`
 // dashboard …`, which deterministically pins HERMES_HOME (see
 // _apply_profile_override in hermes_cli/main.py) and bypasses the sticky
 // ~/.hermes/active_profile file. Unset (null) preserves the legacy behavior:
@@ -1527,18 +1531,21 @@ async function checkUpdates() {
         fetchedAt: Date.now()
       }
     }
-    return {
-      supported: true,
-      branch,
-      currentBranch,
-      behind: currentSha && currentSha === targetSha ? 0 : 1,
-      currentSha,
-      targetSha,
-      commits: [],
-      dirty: dirtyStr.length > 0,
-      hermesRoot: updateRoot,
-      fetchedAt: Date.now()
-    }
+    return withMiaRollbackInfo(
+      {
+        supported: true,
+        branch,
+        currentBranch,
+        behind: currentSha && currentSha === targetSha ? 0 : 1,
+        currentSha,
+        targetSha,
+        commits: [],
+        dirty: dirtyStr.length > 0,
+        hermesRoot: updateRoot,
+        fetchedAt: Date.now()
+      },
+      miaState
+    )
   }
 
   const fetched = await runGit(['fetch', '--quiet', 'origin', branch], { cwd: updateRoot })
@@ -1565,18 +1572,21 @@ async function checkUpdates() {
   const behind = Number.parseInt(countStr, 10) || 0
   const commits = behind > 0 ? await readCommitLog(updateRoot, branch) : []
 
-  return {
-    supported: true,
-    branch,
-    currentBranch,
-    behind,
-    currentSha,
-    targetSha,
-    commits,
-    dirty: dirtyStr.length > 0,
-    hermesRoot: updateRoot,
-    fetchedAt: Date.now()
-  }
+  return withMiaRollbackInfo(
+    {
+      supported: true,
+      branch,
+      currentBranch,
+      behind,
+      currentSha,
+      targetSha,
+      commits,
+      dirty: dirtyStr.length > 0,
+      hermesRoot: updateRoot,
+      fetchedAt: Date.now()
+    },
+    miaState
+  )
 }
 
 function readCommitLog(cwd, branch, remote = 'origin') {
@@ -1597,13 +1607,64 @@ function readCommitLog(cwd, branch, remote = 'origin') {
   )
 }
 
+function existingFilePath(value) {
+  return typeof value === 'string' && value && fileExists(value) ? value : null
+}
+
+function normalizedSha512(value) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim().toLowerCase()
+  return /^[a-f0-9]{128}$/.test(trimmed) ? trimmed : null
+}
+
+function readMiaInstallHistoryState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(MIA_INSTALL_HISTORY_PATH, 'utf8'))
+    if (!parsed || typeof parsed !== 'object') return null
+    const previous = parsed.previous && typeof parsed.previous === 'object' ? parsed.previous : null
+    const current = parsed.current && typeof parsed.current === 'object' ? parsed.current : null
+    const previousInstallerPath = existingFilePath(previous?.installerPath)
+    if (!previousInstallerPath) return null
+    return {
+      installerPath: null,
+      beforeSha: typeof previous.sha === 'string' ? previous.sha : null,
+      afterSha: typeof current?.sha === 'string' ? current.sha : '',
+      afterCommit: typeof current?.sha === 'string' ? current.sha : '',
+      upstreamSha: null,
+      installerSha512: null,
+      packageBuiltAt: typeof current?.packageBuiltAt === 'string' ? current.packageBuiltAt : null,
+      dirty: false,
+      createdAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
+      branch: 'mia-hermes',
+      previousInstallerPath,
+      previousInstallerSha512: normalizedSha512(previous?.installerSha512),
+      previousVersion: typeof previous.version === 'string' ? previous.version : null,
+      previousSha: typeof previous.sha === 'string' ? previous.sha : null,
+      previousPackageBuiltAt: typeof previous.packageBuiltAt === 'string' ? previous.packageBuiltAt : null
+    }
+  } catch {
+    return null
+  }
+}
+
 function readMiaUpdateState() {
+  const historyState = readMiaInstallHistoryState()
   try {
     const parsed = JSON.parse(fs.readFileSync(MIA_UPDATE_STATE_PATH, 'utf8'))
-    if (!parsed || typeof parsed !== 'object') return null
-    const installerPath = typeof parsed.installerPath === 'string' ? parsed.installerPath : ''
+    if (!parsed || typeof parsed !== 'object') return historyState
+
+    const installerPath = existingFilePath(parsed.installerPath)
+    const previousInstallerPath =
+      existingFilePath(parsed.previousInstallerPath) ||
+      existingFilePath(parsed.rollbackInstallerPath) ||
+      historyState?.previousInstallerPath
     const afterSha = typeof parsed.afterSha === 'string' ? parsed.afterSha : ''
-    if (!installerPath || !afterSha || !fileExists(installerPath)) return null
+
+    // A pending update needs its current installer; rollback-only metadata is
+    // still useful after the update is already installed, so don't discard the
+    // whole state just because the current installer is no longer pending.
+    if ((!installerPath || !afterSha) && !previousInstallerPath) return null
+
     return {
       installerPath,
       beforeSha: typeof parsed.beforeSha === 'string' ? parsed.beforeSha : null,
@@ -1614,10 +1675,29 @@ function readMiaUpdateState() {
       // commit for the new app to decide when that package is already applied.
       afterCommit: typeof parsed.afterCommit === 'string' ? parsed.afterCommit : afterSha,
       upstreamSha: typeof parsed.upstreamSha === 'string' ? parsed.upstreamSha : null,
+      installerSha512: normalizedSha512(parsed.installerSha512),
       packageBuiltAt: typeof parsed.packageBuiltAt === 'string' ? parsed.packageBuiltAt : null,
       dirty: parsed.dirty === true,
       createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : null,
-      branch: typeof parsed.branch === 'string' ? parsed.branch : 'mia-hermes'
+      branch: typeof parsed.branch === 'string' ? parsed.branch : 'mia-hermes',
+      previousInstallerPath,
+      previousInstallerSha512:
+        normalizedSha512(parsed.previousInstallerSha512 || parsed.rollbackInstallerSha512) || historyState?.previousInstallerSha512,
+      previousVersion: typeof parsed.previousVersion === 'string' ? parsed.previousVersion : historyState?.previousVersion || null,
+      previousSha:
+        typeof parsed.previousSha === 'string'
+          ? parsed.previousSha
+          : typeof parsed.rollbackSha === 'string'
+            ? parsed.rollbackSha
+            : typeof parsed.beforeSha === 'string'
+              ? parsed.beforeSha
+              : historyState?.previousSha || null,
+      previousPackageBuiltAt:
+        typeof parsed.previousPackageBuiltAt === 'string'
+          ? parsed.previousPackageBuiltAt
+          : typeof parsed.rollbackBuiltAt === 'string'
+            ? parsed.rollbackBuiltAt
+            : historyState?.previousPackageBuiltAt || null
     }
   } catch {
     return null
@@ -1641,7 +1721,7 @@ function sameCommitish(a, b) {
 }
 
 function isMiaInstallerPending(state) {
-  if (!state?.afterSha) return false
+  if (!state?.afterSha || !state.installerPath) return false
   const installed = currentInstalledBuildIdentity()
   if (!installed.commit) return true
 
@@ -1658,34 +1738,53 @@ function isMiaInstallerPending(state) {
   return false
 }
 
-function miaPendingUpdateStatus(updateRoot, state) {
-  const targetSha = state.afterCommit || state.afterSha
+function miaRollbackInfoFromState(state) {
+  if (!state?.previousInstallerPath) return null
   return {
-    supported: true,
-    source: 'mia-installer',
-    branch: state.branch || 'mia-hermes',
-    currentBranch: 'mia-hermes',
-    behind: 1,
-    currentSha: currentInstalledCommit() || state.beforeSha || undefined,
-    targetSha,
-    commits: [
-      {
-        sha: targetSha,
-        summary: state.dirty
-          ? 'M.i.A Hermes local package is ready to install'
-          : 'M.i.A Hermes update package is ready to install',
-        author: 'M.i.A Updater',
-        at: state.createdAt ? Date.parse(state.createdAt) || Date.now() : Date.now()
-      }
-    ],
-    dirty: state.dirty === true,
-    hermesRoot: updateRoot,
-    installerPath: state.installerPath,
-    fetchedAt: Date.now(),
-    message: 'A M.i.A Hermes installer has already been prepared.'
+    available: true,
+    installerPath: state.previousInstallerPath,
+    version: state.previousVersion || undefined,
+    targetSha: state.previousSha || state.beforeSha || undefined,
+    currentSha: currentInstalledCommit() || state.afterCommit || state.afterSha || undefined,
+    packageBuiltAt: state.previousPackageBuiltAt || undefined
   }
 }
 
+function withMiaRollbackInfo(status, state) {
+  const rollback = miaRollbackInfoFromState(state)
+  return rollback ? { ...status, rollback } : status
+}
+
+function miaPendingUpdateStatus(updateRoot, state) {
+  const targetSha = state.afterCommit || state.afterSha
+  return withMiaRollbackInfo(
+    {
+      supported: true,
+      source: 'mia-installer',
+      branch: state.branch || 'mia-hermes',
+      currentBranch: 'mia-hermes',
+      behind: 1,
+      currentSha: currentInstalledCommit() || state.beforeSha || undefined,
+      targetSha,
+      commits: [
+        {
+          sha: targetSha,
+          summary: state.dirty
+            ? 'M.i.A Hermes local package is ready to install'
+            : 'M.i.A Hermes update package is ready to install',
+          author: 'M.i.A Updater',
+          at: state.createdAt ? Date.parse(state.createdAt) || Date.now() : Date.now()
+        }
+      ],
+      dirty: state.dirty === true,
+      hermesRoot: updateRoot,
+      installerPath: state.installerPath,
+      fetchedAt: Date.now(),
+      message: 'A M.i.A Hermes installer has already been prepared.'
+    },
+    state
+  )
+}
 
 let updateInFlight = false
 
@@ -1844,6 +1943,93 @@ async function releaseBackendLock(updateRoot, tag) {
   return { unlocked: false }
 }
 
+function sha512File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha512')
+    const stream = fs.createReadStream(filePath)
+    stream.on('data', chunk => hash.update(chunk))
+    stream.on('error', reject)
+    stream.on('end', () => resolve(hash.digest('hex')))
+  })
+}
+
+async function verifyInstallerSha512(installerPath, expectedSha512, label = 'installer') {
+  const expected = normalizedSha512(expectedSha512)
+  if (!expected) return
+  const actual = await sha512File(installerPath)
+  if (actual !== expected) {
+    throw new Error(`Refusing to run ${label}: SHA-512 mismatch for ${installerPath}`)
+  }
+}
+
+function cmdQuote(value) {
+  return `"${String(value).replace(/"/g, '""')}"`
+}
+
+function writeWindowsNsisHandoffScript({ installerPath, installDir, mode }) {
+  fs.mkdirSync(MIA_UPDATE_HANDOFF_DIR, { recursive: true })
+  fs.mkdirSync(path.dirname(MIA_NSIS_HANDOFF_LOG_PATH), { recursive: true })
+  const safeMode = String(mode || 'update').replace(/[^a-z0-9_-]/gi, '-').toLowerCase()
+  const scriptPath = path.join(MIA_UPDATE_HANDOFF_DIR, `mia-${safeMode}-${Date.now()}-${process.pid}.cmd`)
+  const lines = [
+    '@echo off',
+    'setlocal EnableExtensions',
+    `set "LOG=${MIA_NSIS_HANDOFF_LOG_PATH}"`,
+    `echo [%DATE% %TIME%] M.i.A Hermes ${safeMode} handoff prepared >> "%LOG%"`,
+    `echo [%DATE% %TIME%] waiting for desktop pid ${process.pid} >> "%LOG%"`,
+    ':wait_desktop',
+    `tasklist /FI "PID eq ${process.pid}" 2>NUL | findstr /R /C:"[ ]${process.pid}[ ]" >NUL`,
+    'if not errorlevel 1 (',
+    '  timeout /t 1 /nobreak >NUL',
+    '  goto wait_desktop',
+    ')',
+    `echo [%DATE% %TIME%] running ${cmdQuote(installerPath)} /S /D=${installDir} >> "%LOG%"`,
+    `${cmdQuote(installerPath)} /S /D=${installDir} >> "%LOG%" 2>&1`,
+    'set "RC=%ERRORLEVEL%"',
+    `echo [%DATE% %TIME%] installer exit code %RC% >> "%LOG%"`,
+    'exit /b %RC%',
+    ''
+  ]
+  fs.writeFileSync(scriptPath, lines.join('\r\n'), 'utf8')
+  return scriptPath
+}
+
+function launchWindowsNsisAfterExit({ installerPath, installDir, mode }) {
+  const scriptPath = writeWindowsNsisHandoffScript({ installerPath, installDir, mode })
+  const shell = process.env.ComSpec || 'cmd.exe'
+  const child = spawn(shell, ['/d', '/s', '/c', cmdQuote(scriptPath)], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true
+  })
+  child.once('error', err => {
+    rememberLog(`[updates] failed to launch M.i.A ${mode || 'update'} handoff: ${err.message}`)
+  })
+  child.unref()
+  rememberLog(
+    `[updates] launched M.i.A ${mode || 'update'} handoff script ${scriptPath}; installer=${installerPath}; installDir=${installDir}`
+  )
+  return { scriptPath, pid: child.pid || null }
+}
+
+async function handOffMiaNsisInstaller({ installerPath, installerSha512, mode, progressMessage }) {
+  if (!IS_WINDOWS) {
+    throw new Error('M.i.A installer handoff is only supported on Windows.')
+  }
+  if (!installerPath || !fileExists(installerPath)) {
+    throw new Error('M.i.A installer is missing; cannot continue.')
+  }
+  await verifyInstallerSha512(installerPath, installerSha512, `${mode || 'update'} installer`)
+  await releaseBackendLockForUpdate(resolveUpdateRoot())
+  const installDir = path.dirname(process.resourcesPath)
+  emitUpdateProgress({ stage: mode === 'rollback' ? 'rollback' : 'restart', message: progressMessage, percent: 100 })
+  const handoff = launchWindowsNsisAfterExit({ installerPath, installDir, mode })
+  setTimeout(() => {
+    app.quit()
+  }, 250)
+  return { ok: true, handedOff: true, updater: installerPath, handoffScript: handoff.scriptPath }
+}
+
 // applyUpdates — hand off to the installer's --update flow, then exit.
 //
 // The desktop is a pure consumer: it does NOT git pull / pip install / rebuild
@@ -1863,21 +2049,12 @@ async function applyUpdates(opts = {}) {
   try {
     const miaState = readMiaUpdateState()
     if (isMiaInstallerPending(miaState)) {
-      await releaseBackendLockForUpdate(resolveUpdateRoot())
-      emitUpdateProgress({ stage: 'restart', message: 'Installing update silently…', percent: 100 })
-      // NSIS silent install: /S = no UI, /D = install directory (must be unquoted even with spaces)
-      const installDir = path.dirname(process.resourcesPath)
-      const child = spawn(miaState.installerPath, ['/S', `/D=${installDir}`], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true
+      return await handOffMiaNsisInstaller({
+        installerPath: miaState.installerPath,
+        installerSha512: miaState.installerSha512,
+        mode: 'update',
+        progressMessage: 'Installing update silently…'
       })
-      child.unref()
-      rememberLog(`[updates] launched silent M.i.A installer: ${miaState.installerPath} /S /D=${installDir}; exiting desktop`)
-      setTimeout(() => {
-        app.quit()
-      }, 1500)
-      return { ok: true, handedOff: true, updater: miaState.installerPath }
     }
 
     const updater = resolveUpdaterBinary()
@@ -1960,6 +2137,32 @@ async function applyUpdates(opts = {}) {
     }, 600)
 
     return { ok: true, handedOff: true, updater }
+  } finally {
+    updateInFlight = false
+  }
+}
+
+async function rollbackUpdates() {
+  if (updateInFlight) {
+    throw new Error('An update or rollback is already in progress.')
+  }
+  updateInFlight = true
+
+  try {
+    const miaState = readMiaUpdateState()
+    const rollback = miaRollbackInfoFromState(miaState)
+    if (!rollback?.available || !rollback.installerPath) {
+      const message = 'No previous M.i.A Hermes version is available to restore.'
+      emitUpdateProgress({ stage: 'error', message, percent: null, error: 'rollback-unavailable' })
+      return { ok: false, error: 'rollback-unavailable', message }
+    }
+
+    return await handOffMiaNsisInstaller({
+      installerPath: rollback.installerPath,
+      installerSha512: miaState.previousInstallerSha512,
+      mode: 'rollback',
+      progressMessage: 'Restoring previous M.i.A Hermes version…'
+    })
   } finally {
     updateInFlight = false
   }
@@ -6239,6 +6442,14 @@ ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
   applyUpdates(payload || {}).catch(error => ({
     ok: false,
     error: 'apply-failed',
+    message: error?.message || String(error)
+  }))
+)
+
+ipcMain.handle('hermes:updates:rollback', async () =>
+  rollbackUpdates().catch(error => ({
+    ok: false,
+    error: 'rollback-failed',
     message: error?.message || String(error)
   }))
 )

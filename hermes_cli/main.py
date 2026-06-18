@@ -7335,6 +7335,7 @@ def _install_python_dependencies_with_optional_fallback(
 
     try:
         _install(["install", "-e", f".[{group}]"])
+        _verify_core_dependencies_installed(install_cmd_prefix, env=env, group=group)
         return
     except subprocess.CalledProcessError:
         print(
@@ -7463,11 +7464,17 @@ def _verify_core_dependencies_installed(
 
     def _missing_deps() -> list[str]:
         check_script = (
-            "import importlib.metadata as md, sys\n"
+            "import importlib, importlib.metadata as md, sys\n"
+            "IMPORT_NAME_OVERRIDES={'concurrent-log-handler':'concurrent_log_handler'}\n"
             "missing=[]\n"
             "for name in sys.argv[1:]:\n"
             "    try: md.version(name)\n"
-            "    except md.PackageNotFoundError: missing.append(name)\n"
+            "    except md.PackageNotFoundError:\n"
+            "        missing.append(name); continue\n"
+            "    module=IMPORT_NAME_OVERRIDES.get(name)\n"
+            "    if module:\n"
+            "        try: importlib.import_module(module)\n"
+            "        except Exception: missing.append(name)\n"
             "print('\\n'.join(missing))\n"
         )
         try:

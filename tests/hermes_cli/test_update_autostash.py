@@ -399,11 +399,18 @@ def _setup_update_mocks(monkeypatch, tmp_path):
 def test_cmd_update_retries_optional_extras_individually_when_all_fails(monkeypatch, tmp_path, capsys):
     """When .[all] fails, update should keep base deps and retry extras individually."""
     _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr(hermes_main.sys, "platform", "linux")
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
     monkeypatch.setattr(hermes_main, "_is_termux_env", lambda env=None: False)
     monkeypatch.setattr(hermes_main, "_load_installable_optional_extras", lambda group="all": ["matrix", "mcp"])
 
     recorded = []
+    verify_calls = []
+    monkeypatch.setattr(
+        hermes_main,
+        "_verify_core_dependencies_installed",
+        lambda *args, **kwargs: verify_calls.append((args, kwargs)),
+    )
 
     def fake_run(cmd, **kwargs):
         recorded.append(cmd)
@@ -449,10 +456,17 @@ def test_cmd_update_retries_optional_extras_individually_when_all_fails(monkeypa
 def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
     """When .[all] succeeds, no fallback should be attempted."""
     _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr(hermes_main.sys, "platform", "linux")
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
     monkeypatch.setattr(hermes_main, "_is_termux_env", lambda env=None: False)
 
     recorded = []
+    verify_calls = []
+    monkeypatch.setattr(
+        hermes_main,
+        "_verify_core_dependencies_installed",
+        lambda *args, **kwargs: verify_calls.append((args, kwargs)),
+    )
 
     def fake_run(cmd, **kwargs):
         recorded.append(cmd)
@@ -473,6 +487,8 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
     install_cmds = [c for c in recorded if "pip" in c and "install" in c]
     assert len(install_cmds) == 1
     assert ".[all]" in install_cmds[0]
+    assert len(verify_calls) == 1
+    assert verify_calls[0][1]["group"] == "all"
 
 
 def test_install_with_optional_fallback_honors_custom_group(monkeypatch):

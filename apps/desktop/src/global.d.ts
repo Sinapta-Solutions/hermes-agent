@@ -105,6 +105,7 @@ declare global {
       updates: {
         check: () => Promise<DesktopUpdateStatus>
         apply: (opts?: DesktopUpdateApplyOptions) => Promise<DesktopUpdateApplyResult>
+        rollback: () => Promise<DesktopUpdateApplyResult>
         getBranch: () => Promise<{ branch: string }>
         setBranch: (name: string) => Promise<{ branch: string }>
         onProgress: (callback: (payload: DesktopUpdateProgress) => void) => () => void
@@ -201,6 +202,7 @@ export interface DesktopUpdateStatus {
   supported: boolean
   source?: 'git' | 'mia-installer'
   installerPath?: string
+  rollback?: DesktopUpdateRollbackInfo
   branch?: string
   currentBranch?: string
   reason?: string
@@ -212,6 +214,16 @@ export interface DesktopUpdateStatus {
   commits?: DesktopUpdateCommit[]
   dirty?: boolean
   fetchedAt?: number
+}
+
+export interface DesktopUpdateRollbackInfo {
+  available: boolean
+  installerPath?: string
+  version?: string
+  targetSha?: string
+  currentSha?: string
+  packageBuiltAt?: string
+  message?: string
 }
 
 export type DesktopUpdateDirtyStrategy = 'abort' | 'stash' | 'force'
@@ -230,9 +242,24 @@ export interface DesktopUpdateApplyResult {
   manual?: boolean
   command?: string
   hermesRoot?: string
+  handedOff?: boolean
+  updater?: string
+  handoffScript?: string
 }
 
-export type DesktopUpdateStage = 'idle' | 'prepare' | 'fetch' | 'pull' | 'pydeps' | 'restart' | 'manual' | 'error'
+export type DesktopUpdateStage =
+  | 'idle'
+  | 'prepare'
+  | 'fetch'
+  | 'pull'
+  | 'pydeps'
+  | 'update'
+  | 'rebuild'
+  | 'rollback'
+  | 'done'
+  | 'restart'
+  | 'manual'
+  | 'error'
 
 export interface DesktopUpdateProgress {
   stage: DesktopUpdateStage

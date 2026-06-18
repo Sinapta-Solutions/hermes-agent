@@ -14,7 +14,7 @@ import { $desktopOnboarding } from '@/store/onboarding'
 import type { RemoteReauth } from './boot-failure-reauth'
 import { deriveProviderShape, isRemoteReauthFailure, signInLabel } from './boot-failure-reauth'
 
-type BusyAction = 'local' | 'repair' | 'retry' | 'signin' | null
+type BusyAction = 'local' | 'repair' | 'retry' | 'rollback' | 'signin' | null
 
 // A remote gateway whose access cookie has lapsed (e.g. the dashboard
 // restarted on the remote box) boots into this overlay with a reauth-shaped
@@ -122,6 +122,24 @@ export function BootFailureOverlay() {
     window.location.reload()
   }
 
+  const rollback = async () => {
+    setBusy('rollback')
+    try {
+      const result = await window.hermesDesktop?.updates?.rollback?.()
+      if (!result?.ok) {
+        notify({
+          kind: 'warning',
+          title: copy.rollbackUnavailable,
+          message: result?.message || copy.rollbackUnavailableMessage
+        })
+        setBusy(null)
+      }
+    } catch (err) {
+      notifyError(err, copy.rollbackFailed)
+      setBusy(null)
+    }
+  }
+
   const switchToLocalGateway = async () => {
     setBusy('local')
     // applyConnectionConfig reloads the window from the main process.
@@ -211,6 +229,12 @@ export function BootFailureOverlay() {
                   {copy.repairInstall}
                 </Button>
               ) : null}
+              {!remoteReauth ? (
+                <Button disabled={Boolean(busy)} onClick={() => void rollback()} variant="secondary">
+                  {busy === 'rollback' ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                  {copy.rollbackUpdate}
+                </Button>
+              ) : null}
               <Button disabled={Boolean(busy)} onClick={() => void switchToLocalGateway()} variant="secondary">
                 {busy === 'local' ? <Loader2 className="animate-spin" /> : null}
                 {copy.useLocalGateway}
@@ -221,7 +245,7 @@ export function BootFailureOverlay() {
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              {remoteReauth ? copy.remoteSignInHint : copy.repairHint}
+              {remoteReauth ? copy.remoteSignInHint : copy.repairHint} {!remoteReauth ? copy.rollbackHint : ''}
             </p>
           </div>
 

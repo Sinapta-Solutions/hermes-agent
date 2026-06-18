@@ -234,6 +234,47 @@ class TestVerifyCoreDependencies:
             )
             assert mock_quar.call_args[0][0] == fake_scripts
 
+    def test_windows_concurrent_log_handler_checks_import_name(self, tmp_path, fake_venv_python, monkeypatch):
+        """Windows logging depends on the import package, not just dist-info.
+
+        Regression: ``concurrent-log-handler`` can appear in metadata while the
+        importable ``concurrent_log_handler`` package is absent, causing Hermes
+        to crash at startup on Windows.
+        """
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(textwrap.dedent("""\
+            [project]
+            name = "fake"
+            version = "0.0.0"
+            dependencies = [
+              "concurrent-log-handler==0.9.29; sys_platform == 'win32'",
+            ]
+        """))
+        import hermes_cli.main as main_mod
+        monkeypatch.setattr(main_mod, "PROJECT_ROOT", tmp_path)
+        py, venv_root = fake_venv_python
+        env = {"VIRTUAL_ENV": str(venv_root)}
+        captured_probes: list[list[str]] = []
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured_probes.append([str(part) for part in cmd])
+            # Simulate the probe reporting the import-name failure.
+            return MagicMock(returncode=0, stdout="concurrent-log-handler\n", stderr="")
+
+        with patch("hermes_cli.main._resolve_install_target_python", return_value=py), \
+             patch("hermes_cli.main.subprocess.run", side_effect=fake_subprocess_run), \
+             patch("hermes_cli.main._run_install_with_heartbeat") as mock_install, \
+             patch("sys.platform", "win32"):
+
+            from hermes_cli.main import _verify_core_dependencies_installed
+            _verify_core_dependencies_installed(["uv", "pip"], env=env)
+
+        first_probe = captured_probes[0]
+        probe_script = next(part for part in first_probe if "IMPORT_NAME_OVERRIDES" in part)
+        assert "concurrent-log-handler" in first_probe
+        assert "concurrent_log_handler" in probe_script
+        assert mock_install.called, "missing concurrent_log_handler import must trigger repair"
+
 
 class TestResolveInstallTargetPython:
     def test_uses_virtual_env_from_environment(self, tmp_path):

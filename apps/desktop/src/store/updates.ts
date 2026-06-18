@@ -339,6 +339,37 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
   }
 }
 
+export async function rollbackUpdates(): Promise<DesktopUpdateApplyResult> {
+  const bridge = window.hermesDesktop?.updates
+
+  if (!bridge?.rollback) {
+    return { ok: false, error: 'rollback-unavailable', message: translateNow('updates.applyStatus.rollbackUnavailable') }
+  }
+
+  dismissNotification(UPDATE_TOAST_ID)
+  $updateApply.set({
+    ...IDLE,
+    applying: true,
+    stage: 'rollback',
+    message: translateNow('updates.applyStatus.rollbackPreparing')
+  })
+
+  try {
+    const result = await bridge.rollback()
+    if (!result?.ok) {
+      const message = result?.message || translateNow('updates.applyStatus.rollbackFailed')
+      $updateApply.set({ ...$updateApply.get(), applying: false, stage: 'error', error: result?.error || 'rollback-failed', message })
+    }
+
+    return result
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    $updateApply.set({ ...$updateApply.get(), applying: false, stage: 'error', error: 'rollback-failed', message })
+
+    return { ok: false, error: 'rollback-failed', message }
+  }
+}
+
 const BACKEND_RETURN_POLL_MS = 1500
 const BACKEND_RETURN_MAX_ATTEMPTS = 40
 
@@ -443,7 +474,7 @@ export async function applyBackendUpdate(): Promise<DesktopUpdateApplyResult> {
 function ingestProgress(payload: DesktopUpdateProgress): void {
   const current = $updateApply.get()
   const log = [...current.log, { stage: payload.stage, message: payload.message, at: payload.at }].slice(-50)
-  const terminal = payload.stage === 'error' || payload.stage === 'restart' || payload.stage === 'manual'
+  const terminal = payload.stage === 'error' || payload.stage === 'restart' || payload.stage === 'manual' || payload.stage === 'done'
 
   $updateApply.set({
     applying: !terminal,
