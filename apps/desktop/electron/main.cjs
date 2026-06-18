@@ -1850,17 +1850,19 @@ async function applyUpdates(opts = {}) {
     const miaState = readMiaUpdateState()
     if (isMiaInstallerPending(miaState)) {
       await releaseBackendLockForUpdate(resolveUpdateRoot())
-      emitUpdateProgress({ stage: 'restart', message: 'Opening the prepared M.i.A Hermes installer…', percent: 100 })
-      const child = spawn(miaState.installerPath, [], {
+      emitUpdateProgress({ stage: 'restart', message: 'Installing update silently…', percent: 100 })
+      // NSIS silent install: /S = no UI, /D = install directory (must be unquoted even with spaces)
+      const installDir = path.dirname(process.resourcesPath)
+      const child = spawn(miaState.installerPath, ['/S', `/D=${installDir}`], {
         detached: true,
         stdio: 'ignore',
-        windowsHide: false
+        windowsHide: true
       })
       child.unref()
-      rememberLog(`[updates] launched M.i.A installer: ${miaState.installerPath}; exiting desktop`)
+      rememberLog(`[updates] launched silent M.i.A installer: ${miaState.installerPath} /S /D=${installDir}; exiting desktop`)
       setTimeout(() => {
         app.quit()
-      }, 600)
+      }, 1500)
       return { ok: true, handedOff: true, updater: miaState.installerPath }
     }
 

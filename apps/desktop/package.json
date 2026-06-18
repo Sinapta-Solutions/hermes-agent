@@ -29,6 +29,8 @@
     "dist:win": "npm run build && npm run builder -- --win",
     "dist:win:msi": "npm run build && npm run builder -- --win msi",
     "dist:win:nsis": "npm run build && npm run builder -- --win nsis",
+    "release:manifest": "node scripts/write-mia-update-manifest.cjs",
+    "dist:win:nsis:release": "npm run dist:win:nsis && npm run release:manifest",
     "dist:linux": "npm run build && npm run builder -- --linux AppImage deb rpm",
     "test:desktop": "node scripts/test-desktop.mjs",
     "test:desktop:all": "node scripts/test-desktop.mjs all",
