@@ -1970,6 +1970,16 @@ function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`
 }
 
+function appendMiaNsisHandoffLog(message) {
+  try {
+    fs.mkdirSync(path.dirname(MIA_NSIS_HANDOFF_LOG_PATH), { recursive: true })
+    const line = `[${new Date().toISOString()}] ${message}${String.fromCharCode(13, 10)}`
+    fs.appendFileSync(MIA_NSIS_HANDOFF_LOG_PATH, line, 'utf8')
+  } catch (err) {
+    rememberLog(`[updates] failed to write M.i.A handoff log: ${err.message}`)
+  }
+}
+
 function writeWindowsNsisCmdFallbackScript({ installerPath, installDir, relaunchPath, mode }) {
   fs.mkdirSync(MIA_UPDATE_HANDOFF_DIR, { recursive: true })
   fs.mkdirSync(path.dirname(MIA_NSIS_HANDOFF_LOG_PATH), { recursive: true })
@@ -2145,19 +2155,23 @@ function launchWindowsNsisAfterExit({ installerPath, installDir, relaunchPath, m
   const scriptPath = powershell
     ? writeWindowsNsisHandoffScript({ installerPath, installDir, relaunchPath, mode })
     : writeWindowsNsisCmdFallbackScript({ installerPath, installDir, relaunchPath, mode })
-  const child = powershell
-    ? spawn(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true
-      })
-    : spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', cmdQuote(scriptPath)], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true
-      })
+  const launcher = powershell || process.env.ComSpec || 'cmd.exe'
+  const launcherArgs = powershell
+    ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath]
+    : ['/d', '/s', '/c', 'call', scriptPath]
+
+  appendMiaNsisHandoffLog(
+    `prepared ${mode || 'update'} handoff via ${powershell ? 'PowerShell' : 'cmd fallback'}; script=${scriptPath}; installer=${installerPath}; installDir=${installDir}; relaunch=${relaunchPath}`
+  )
+
+  const child = spawn(launcher, launcherArgs, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true
+  })
   child.once('error', err => {
     rememberLog(`[updates] failed to launch M.i.A ${mode || 'update'} handoff: ${err.message}`)
+    appendMiaNsisHandoffLog(`failed to launch ${mode || 'update'} handoff: ${err.message}`)
   })
   child.unref()
   rememberLog(
