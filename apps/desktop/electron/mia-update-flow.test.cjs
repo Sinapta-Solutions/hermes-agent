@@ -32,17 +32,33 @@ test('M.i.A prepared installer uses validated post-exit NSIS handoff', () => {
   assert.doesNotMatch(block, /spawn\(miaState\.installerPath/, 'installer must not be spawned before Desktop exits')
 })
 
-test('M.i.A NSIS handoff waits for Desktop exit and keeps silent args', () => {
+test('M.i.A NSIS handoff waits for Desktop exit, shows progress, and relaunches', () => {
   const helperStart = mainSource.indexOf('function writeWindowsNsisHandoffScript')
   assert.notEqual(helperStart, -1, 'missing NSIS handoff script helper')
   const helperEnd = mainSource.indexOf('function launchWindowsNsisAfterExit', helperStart)
   assert.notEqual(helperEnd, -1, 'missing handoff launcher after script helper')
   const helper = mainSource.slice(helperStart, helperEnd)
 
-  assert.match(helper, /:wait_desktop/, 'handoff script must wait for the Desktop process to exit')
-  assert.match(helper, /tasklist \/FI/, 'handoff script must poll the parent pid')
-  assert.match(helper, /\/S \/D=\$\{installDir\}/, 'NSIS silent args must be preserved with /D last')
+  assert.match(helper, /System\.Windows\.Forms/, 'handoff must show an external Windows progress window')
+  assert.match(helper, /ProgressBar/, 'handoff progress window must include a progress bar')
+  assert.match(helper, /Get-Process -Id \$DesktopPid/, 'handoff script must wait for the Desktop process to exit')
+  assert.match(helper, /ArgumentList @\("\/S", \("\/D=" \+ \$InstallDir\)\)/, 'NSIS silent args must be preserved with /D last')
+  assert.match(helper, /Start-MiaHermes/, 'handoff must explicitly relaunch M.i.A Hermes after silent install')
+  assert.match(helper, /Start-Process -FilePath \$RelaunchPath/, 'handoff must start the installed executable')
   assert.match(helper, /MIA_NSIS_HANDOFF_LOG_PATH/, 'handoff must leave a forensic log')
+})
+
+test('M.i.A NSIS handoff launches through hidden PowerShell UI process', () => {
+  const launcherStart = mainSource.indexOf('function launchWindowsNsisAfterExit')
+  assert.notEqual(launcherStart, -1, 'missing handoff launcher')
+  const launcherEnd = mainSource.indexOf('async function handOffMiaNsisInstaller', launcherStart)
+  assert.notEqual(launcherEnd, -1, 'missing installer handoff after launcher')
+  const launcher = mainSource.slice(launcherStart, launcherEnd)
+
+  assert.match(launcher, /windowsPowerShellPath\(\)/, 'launcher must prefer Windows PowerShell for progress UI')
+  assert.match(launcher, /'-ExecutionPolicy', 'Bypass'/, 'PowerShell handoff must bypass local policy for generated script')
+  assert.match(launcher, /windowsHide: true/, 'handoff launcher must not flash a console')
+  assert.match(launcher, /relaunchPath/, 'launcher must pass relaunch path to the handoff script')
 })
 
 test('M.i.A update rollback IPC is wired through main and preload', () => {

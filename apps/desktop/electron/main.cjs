@@ -1966,7 +1966,11 @@ function cmdQuote(value) {
   return `"${String(value).replace(/"/g, '""')}"`
 }
 
-function writeWindowsNsisHandoffScript({ installerPath, installDir, mode }) {
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`
+}
+
+function writeWindowsNsisCmdFallbackScript({ installerPath, installDir, relaunchPath, mode }) {
   fs.mkdirSync(MIA_UPDATE_HANDOFF_DIR, { recursive: true })
   fs.mkdirSync(path.dirname(MIA_NSIS_HANDOFF_LOG_PATH), { recursive: true })
   const safeMode = String(mode || 'update').replace(/[^a-z0-9_-]/gi, '-').toLowerCase()
@@ -1975,7 +1979,7 @@ function writeWindowsNsisHandoffScript({ installerPath, installDir, mode }) {
     '@echo off',
     'setlocal EnableExtensions',
     `set "LOG=${MIA_NSIS_HANDOFF_LOG_PATH}"`,
-    `echo [%DATE% %TIME%] M.i.A Hermes ${safeMode} handoff prepared >> "%LOG%"`,
+    `echo [%DATE% %TIME%] M.i.A Hermes ${safeMode} fallback handoff prepared >> "%LOG%"`,
     `echo [%DATE% %TIME%] waiting for desktop pid ${process.pid} >> "%LOG%"`,
     ':wait_desktop',
     `tasklist /FI "PID eq ${process.pid}" 2>NUL | findstr /R /C:"[ ]${process.pid}[ ]" >NUL`,
@@ -1987,6 +1991,8 @@ function writeWindowsNsisHandoffScript({ installerPath, installDir, mode }) {
     `${cmdQuote(installerPath)} /S /D=${installDir} >> "%LOG%" 2>&1`,
     'set "RC=%ERRORLEVEL%"',
     `echo [%DATE% %TIME%] installer exit code %RC% >> "%LOG%"`,
+    'if "%RC%"=="0" start "" ' + cmdQuote(relaunchPath),
+    'if "%RC%"=="3010" start "" ' + cmdQuote(relaunchPath),
     'exit /b %RC%',
     ''
   ]
@@ -1994,20 +2000,168 @@ function writeWindowsNsisHandoffScript({ installerPath, installDir, mode }) {
   return scriptPath
 }
 
-function launchWindowsNsisAfterExit({ installerPath, installDir, mode }) {
-  const scriptPath = writeWindowsNsisHandoffScript({ installerPath, installDir, mode })
-  const shell = process.env.ComSpec || 'cmd.exe'
-  const child = spawn(shell, ['/d', '/s', '/c', cmdQuote(scriptPath)], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true
-  })
+function writeWindowsNsisHandoffScript({ installerPath, installDir, relaunchPath, mode }) {
+  fs.mkdirSync(MIA_UPDATE_HANDOFF_DIR, { recursive: true })
+  fs.mkdirSync(path.dirname(MIA_NSIS_HANDOFF_LOG_PATH), { recursive: true })
+  const safeMode = String(mode || 'update').replace(/[^a-z0-9_-]/gi, '-').toLowerCase()
+  const title = safeMode === 'rollback' ? 'Restaurando M.i.A Hermes' : 'Atualizando M.i.A Hermes'
+  const waitingText = safeMode === 'rollback' ? 'Fechando M.i.A Hermes para restaurar…' : 'Fechando M.i.A Hermes para atualizar…'
+  const installingText = safeMode === 'rollback' ? 'Reinstalando a versão anterior…' : 'Instalando atualização silenciosa…'
+  const relaunchText = 'Abrindo M.i.A Hermes novamente…'
+  const scriptPath = path.join(MIA_UPDATE_HANDOFF_DIR, `mia-${safeMode}-${Date.now()}-${process.pid}.ps1`)
+  const lines = [
+    '$ErrorActionPreference = "Continue"',
+    `$LogPath = ${psQuote(MIA_NSIS_HANDOFF_LOG_PATH)}`,
+    `$InstallerPath = ${psQuote(installerPath)}`,
+    `$InstallDir = ${psQuote(installDir)}`,
+    `$RelaunchPath = ${psQuote(relaunchPath)}`,
+    `$DesktopPid = ${process.pid}`,
+    `$Title = ${psQuote(title)}`,
+    `$WaitingText = ${psQuote(waitingText)}`,
+    `$InstallingText = ${psQuote(installingText)}`,
+    `$RelaunchText = ${psQuote(relaunchText)}`,
+    'function Write-HandoffLog([string]$Message) {',
+    '  try {',
+    '    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null',
+    '    Add-Content -LiteralPath $LogPath -Value ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), $Message)',
+    '  } catch {}',
+    '}',
+    'function Invoke-InstallerSilently {',
+    '  Write-HandoffLog ("running installer: " + $InstallerPath + " /S /D=" + $InstallDir)',
+    '  $proc = Start-Process -FilePath $InstallerPath -ArgumentList @("/S", ("/D=" + $InstallDir)) -PassThru -WindowStyle Hidden',
+    '  while ($proc -and -not $proc.HasExited) {',
+    '    if (Get-Command Pump-ProgressUi -ErrorAction SilentlyContinue) { Pump-ProgressUi }',
+    '    Start-Sleep -Milliseconds 120',
+    '  }',
+    '  if ($proc) { $proc.WaitForExit() }',
+    '  $rc = if ($null -eq $proc -or $null -eq $proc.ExitCode) { 0 } else { [int]$proc.ExitCode }',
+    '  Write-HandoffLog ("installer exit code " + $rc)',
+    '  return $rc',
+    '}',
+    'function Start-MiaHermes {',
+    '  if (-not (Test-Path -LiteralPath $RelaunchPath)) {',
+    '    Write-HandoffLog ("relaunch path missing: " + $RelaunchPath)',
+    '    return $false',
+    '  }',
+    '  $processName = [System.IO.Path]::GetFileNameWithoutExtension($RelaunchPath)',
+    '  Start-Sleep -Milliseconds 500',
+    '  $alreadyRunning = Get-Process -Name $processName -ErrorAction SilentlyContinue',
+    '  if ($alreadyRunning) {',
+    '    Write-HandoffLog ("relaunch skipped; process already running: " + $processName)',
+    '    return $true',
+    '  }',
+    '  Write-HandoffLog ("relaunching: " + $RelaunchPath)',
+    '  Start-Process -FilePath $RelaunchPath -WorkingDirectory $InstallDir | Out-Null',
+    '  return $true',
+    '}',
+    'Write-HandoffLog ("M.i.A Hermes handoff prepared for desktop pid " + $DesktopPid)',
+    'try {',
+    '  Add-Type -AssemblyName System.Windows.Forms',
+    '  Add-Type -AssemblyName System.Drawing',
+    '  [System.Windows.Forms.Application]::EnableVisualStyles()',
+    '} catch {',
+    '  Write-HandoffLog ("progress UI unavailable: " + $_.Exception.Message)',
+    '  while (Get-Process -Id $DesktopPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }',
+    '  $rc = Invoke-InstallerSilently',
+    '  if ($rc -eq 0 -or $rc -eq 3010) { [void](Start-MiaHermes) }',
+    '  exit $rc',
+    '}',
+    '$form = New-Object System.Windows.Forms.Form',
+    '$form.Text = $Title',
+    '$form.StartPosition = "CenterScreen"',
+    '$form.Size = New-Object System.Drawing.Size(440, 160)',
+    '$form.FormBorderStyle = "FixedDialog"',
+    '$form.MaximizeBox = $false',
+    '$form.MinimizeBox = $false',
+    '$form.TopMost = $true',
+    '$label = New-Object System.Windows.Forms.Label',
+    '$label.Dock = "Top"',
+    '$label.Height = 58',
+    '$label.TextAlign = "MiddleCenter"',
+    '$label.Font = New-Object System.Drawing.Font("Segoe UI", 10)',
+    '$progress = New-Object System.Windows.Forms.ProgressBar',
+    '$progress.Dock = "Top"',
+    '$progress.Height = 18',
+    '$progress.Minimum = 0',
+    '$progress.Maximum = 100',
+    '$progress.Value = 5',
+    '$pad = New-Object System.Windows.Forms.Panel',
+    '$pad.Dock = "Top"',
+    '$pad.Height = 18',
+    '$pad.Padding = New-Object System.Windows.Forms.Padding(24, 0, 24, 0)',
+    '$pad.Controls.Add($progress)',
+    '$form.Controls.Add($pad)',
+    '$form.Controls.Add($label)',
+    'function Pump-ProgressUi { [System.Windows.Forms.Application]::DoEvents() }',
+    'function Set-HandoffProgress([int]$Value, [string]$Text, [bool]$Marquee = $false) {',
+    '  $label.Text = $Text',
+    '  if ($Marquee) {',
+    '    $progress.Style = "Marquee"',
+    '    $progress.MarqueeAnimationSpeed = 35',
+    '  } else {',
+    '    $progress.Style = "Continuous"',
+    '    $progress.MarqueeAnimationSpeed = 0',
+    '    $progress.Value = [Math]::Max($progress.Minimum, [Math]::Min($progress.Maximum, $Value))',
+    '  }',
+    '  Pump-ProgressUi',
+    '}',
+    '$form.Show()',
+    'Set-HandoffProgress 8 $WaitingText',
+    '$waitProgress = 8',
+    'while (Get-Process -Id $DesktopPid -ErrorAction SilentlyContinue) {',
+    '  if ($waitProgress -lt 32) { $waitProgress += 1 }',
+    '  Set-HandoffProgress $waitProgress $WaitingText',
+    '  Start-Sleep -Milliseconds 250',
+    '}',
+    'Set-HandoffProgress 38 $InstallingText',
+    'Start-Sleep -Milliseconds 350',
+    'Set-HandoffProgress 50 $InstallingText $true',
+    '$rc = Invoke-InstallerSilently',
+    'Set-HandoffProgress 86 $InstallingText',
+    'if ($rc -ne 0 -and $rc -ne 3010) {',
+    '  Set-HandoffProgress 100 "A instalação falhou. Veja o log."',
+    '  [System.Windows.Forms.MessageBox]::Show("A atualização não terminou. Código de saída: $rc`n`nLog: $LogPath", $Title, "OK", "Error") | Out-Null',
+    '  exit $rc',
+    '}',
+    'Set-HandoffProgress 92 $RelaunchText',
+    '$relaunchOk = Start-MiaHermes',
+    'if (-not $relaunchOk) {',
+    '  Set-HandoffProgress 100 "Instalado, mas não consegui reabrir automaticamente."',
+    '  [System.Windows.Forms.MessageBox]::Show("A instalação terminou, mas o executável não foi encontrado para reabrir.`n`n$RelaunchPath", $Title, "OK", "Warning") | Out-Null',
+    '  exit 2',
+    '}',
+    'Set-HandoffProgress 100 "Pronto."',
+    'Start-Sleep -Milliseconds 1000',
+    '$form.Close()',
+    'exit 0',
+    ''
+  ]
+  fs.writeFileSync(scriptPath, lines.join('\r\n'), 'utf8')
+  return scriptPath
+}
+
+function launchWindowsNsisAfterExit({ installerPath, installDir, relaunchPath, mode }) {
+  const powershell = windowsPowerShellPath()
+  const scriptPath = powershell
+    ? writeWindowsNsisHandoffScript({ installerPath, installDir, relaunchPath, mode })
+    : writeWindowsNsisCmdFallbackScript({ installerPath, installDir, relaunchPath, mode })
+  const child = powershell
+    ? spawn(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      })
+    : spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', cmdQuote(scriptPath)], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      })
   child.once('error', err => {
     rememberLog(`[updates] failed to launch M.i.A ${mode || 'update'} handoff: ${err.message}`)
   })
   child.unref()
   rememberLog(
-    `[updates] launched M.i.A ${mode || 'update'} handoff script ${scriptPath}; installer=${installerPath}; installDir=${installDir}`
+    `[updates] launched M.i.A ${mode || 'update'} handoff script ${scriptPath}; installer=${installerPath}; installDir=${installDir}; relaunch=${relaunchPath}`
   )
   return { scriptPath, pid: child.pid || null }
 }
@@ -2019,14 +2173,22 @@ async function handOffMiaNsisInstaller({ installerPath, installerSha512, mode, p
   if (!installerPath || !fileExists(installerPath)) {
     throw new Error('M.i.A installer is missing; cannot continue.')
   }
+  const stage = mode === 'rollback' ? 'rollback' : 'restart'
+  emitUpdateProgress({ stage: 'prepare', message: 'Verifying installer integrity…', percent: 18 })
   await verifyInstallerSha512(installerPath, installerSha512, `${mode || 'update'} installer`)
+  emitUpdateProgress({ stage: 'prepare', message: 'Releasing backend locks…', percent: 36 })
   await releaseBackendLockForUpdate(resolveUpdateRoot())
   const installDir = path.dirname(process.resourcesPath)
-  emitUpdateProgress({ stage: mode === 'rollback' ? 'rollback' : 'restart', message: progressMessage, percent: 100 })
-  const handoff = launchWindowsNsisAfterExit({ installerPath, installDir, mode })
-  setTimeout(() => {
-    app.quit()
-  }, 250)
+  const relaunchPath = process.execPath || path.join(installDir, 'MIA-Hermes.exe')
+  emitUpdateProgress({ stage, message: progressMessage, percent: 62 })
+  const handoff = launchWindowsNsisAfterExit({ installerPath, installDir, relaunchPath, mode })
+  emitUpdateProgress({
+    stage,
+    message: 'A Windows progress window is open; M.i.A Hermes will close and reopen when it finishes.',
+    percent: 82
+  })
+  await sleep(1600)
+  app.quit()
   return { ok: true, handedOff: true, updater: installerPath, handoffScript: handoff.scriptPath }
 }
 

@@ -359,6 +359,11 @@ function ApplyingView({ apply, isBackend }: { apply: UpdateApplyState; isBackend
         <DialogDescription className="text-center text-sm">
           {body}
         </DialogDescription>
+        {apply.message ? (
+          <p className="max-w-[22rem] text-center text-xs leading-5 text-muted-foreground/90">
+            {apply.message}
+          </p>
+        ) : null}
       </div>
 
       <div className="h-2 overflow-hidden rounded-full bg-muted">
